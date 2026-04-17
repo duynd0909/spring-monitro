@@ -13,6 +13,9 @@
     <artifactId>monitor-sample</artifactId>
     <name>Monitor Sample</name>
     <description>Sample Spring Boot application demonstrating spring-monitro — not published</description>
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
 
     <dependencies>
         <dependency>

@@ -261,6 +261,56 @@ Spring-Monitro targets Servlet-based (Tomcat/Jetty/Undertow) apps only. WebFlux 
 
 ---
 
+## Publish to GitHub Packages
+
+This repository is configured to deploy Maven artifacts to:
+`https://maven.pkg.github.com/duynd0909/spring-monitro`
+
+### 1. Configure Maven credentials
+
+Create/update `~/.m2/settings.xml`:
+
+```xml
+<settings>
+  <servers>
+    <server>
+      <id>github</id>
+      <username>YOUR_GITHUB_USERNAME</username>
+      <password>YOUR_GITHUB_TOKEN</password>
+    </server>
+  </servers>
+</settings>
+```
+
+Token requirement: a PAT with `write:packages` (and `read:packages` for consuming private packages).
+
+### 2. Deploy package artifacts
+
+```bash
+mvn -DskipTests deploy
+```
+
+The `monitor-sample` module is automatically skipped from deploy.
+
+### 3. Consume in another project
+
+```xml
+<repositories>
+  <repository>
+    <id>github</id>
+    <url>https://maven.pkg.github.com/duynd0909/spring-monitro</url>
+  </repository>
+</repositories>
+
+<dependency>
+  <groupId>com.spring.monitro</groupId>
+  <artifactId>monitor-starter</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+---
+
 ## Limitations (v0.1)
 
 - Each application instance monitors only itself — no multi-instance aggregation

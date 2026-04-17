@@ -17,6 +17,30 @@
     <packaging>pom</packaging>
     <name>Spring Monitro</name>
     <description>Embedded Spring Boot monitoring starter — admin UI on a separate port, no standalone server required</description>
+    <url>https://github.com/duynd0909/spring-monitro</url>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>duynd0909</id>
+            <name>duynd0909</name>
+            <url>https://github.com/duynd0909</url>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:https://github.com/duynd0909/spring-monitro.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/duynd0909/spring-monitro.git</developerConnection>
+        <url>https://github.com/duynd0909/spring-monitro</url>
+        <tag>HEAD</tag>
+    </scm>
 
     <modules>
         <module>monitor-core</module>
@@ -28,6 +52,19 @@
         <module>monitor-starter</module>
         <module>monitor-sample</module>
     </modules>
+
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub Packages</name>
+            <url>https://maven.pkg.github.com/duynd0909/spring-monitro</url>
+        </repository>
+        <snapshotRepository>
+            <id>github</id>
+            <name>GitHub Packages Snapshots</name>
+            <url>https://maven.pkg.github.com/duynd0909/spring-monitro</url>
+        </snapshotRepository>
+    </distributionManagement>
 
     <properties>
         <java.version>17</java.version>
@@ -83,12 +120,47 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
                     <configuration>
-                        <source>17</source>
-                        <target>17</target>
+                        <release>${java.version}</release>
                         <parameters>true</parameters>
                     </configuration>
                 </plugin>
             </plugins>
         </pluginManagement>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.3.1</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.8.0</version>
+                <configuration>
+                    <source>${java.version}</source>
+                    <failOnError>false</failOnError>
+                    <doclint>none</doclint>
+                    <!-- Avoid cross-module offline-link resolution that invokes javadoc in dependent reactor modules. -->
+                    <detectOfflineLinks>false</detectOfflineLinks>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
 </project>
