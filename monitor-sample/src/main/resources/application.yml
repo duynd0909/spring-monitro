@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: spring-monitro-sample
+
+server:
+  port: 8080
+
+embedded:
+  monitor:
+    server:
+      port: 8090
+    security:
+      mode: NONE   # No auth for local dev — set to BASIC and provide a password for production
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,metrics,env,loggers,threaddump,beans"
+  endpoint:
+    health:
+      show-details: always
