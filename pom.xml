@@ -165,6 +165,7 @@
                     <publishingServerId>central</publishingServerId>
                     <autoPublish>true</autoPublish>
                     <waitUntil>published</waitUntil>
+                    <skip>${maven.deploy.skip}</skip>
                 </configuration>
             </plugin>
         </plugins>
