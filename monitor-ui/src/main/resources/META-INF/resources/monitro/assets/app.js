@@ -1,6 +1,6 @@
 // Spring-Monitro admin UI — Vue 3 + VueRouter via CDN, no build step.
 const { createApp, ref, computed, onMounted, onUnmounted, watch } = Vue;
-const { createRouter, createWebHashHistory } = VueRouter;
+const { createRouter, createWebHashHistory, useRoute } = VueRouter;
 
 // ── API client ────────────────────────────────────────────────────────────────
 
@@ -53,8 +53,11 @@ function fmtBytes(bytes) {
 }
 
 function fmtUptime(ms) {
-  if (!ms) return '—';
-  const s = Math.floor(ms / 1000);
+  if (ms == null || ms === '') return '—';
+  if (typeof ms === 'string') return ms;
+  const numeric = Number(ms);
+  if (!Number.isFinite(numeric) || numeric <= 0) return '—';
+  const s = Math.floor(numeric / 1000);
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
         m = Math.floor((s % 3600) / 60), sec = s % 60;
   if (d > 0) return `${d}d ${h}h ${m}m`;
@@ -63,10 +66,47 @@ function fmtUptime(ms) {
   return `${sec}s`;
 }
 
+function fmtPercent(v, digits = 1) {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return `${(n * 100).toFixed(digits)}%`;
+}
+
+function fmtInteger(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return Math.round(n).toString();
+}
+
+function ratioPercent(part, whole) {
+  const p = Number(part);
+  const w = Number(whole);
+  if (!Number.isFinite(p) || !Number.isFinite(w) || w <= 0) return null;
+  return (p / w) * 100;
+}
+
+function statusToneClass(status) {
+  if (!status) return 'tone-unknown';
+  const s = status.toUpperCase();
+  if (s === 'UP') return 'tone-up';
+  if (s === 'DOWN' || s === 'OUT_OF_SERVICE') return 'tone-down';
+  if (s === 'WARN' || s === 'WARNING') return 'tone-warn';
+  return 'tone-unknown';
+}
+
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
 // ── Dashboard realtime constants ──────────────────────────────────────────────
 
-const REFRESH_MS   = 5000;
-const CHART_WINDOW = 30;
+const DEFAULT_REFRESH_MS = 2000;
+const CHART_WINDOW = 45;
+const STATIC_POLL_EVERY = 6;
+const THEME_STORAGE_KEY = 'monitro-theme';
 
 function pushWindow(arr, val) {
   arr.push(val);
@@ -77,68 +117,119 @@ function pushWindow(arr, val) {
 
 const DashboardPage = {
   template: `
-    <div>
-      <div class="page-title">
-        Dashboard
-        <span class="refresh-badge" :class="{ 'refresh-active': refreshing }">● live</span>
-      </div>
+    <div class="dashboard-page">
+      <section class="card dashboard-head">
+        <div>
+          <div class="page-title" style="margin-bottom:6px">System Dashboard</div>
+          <div class="dashboard-subtitle">{{ appLabel }}</div>
+        </div>
+        <div class="dashboard-actions">
+          <span class="live-indicator" :class="{ active: refreshing }">{{ autoRefresh ? 'live' : 'paused' }}</span>
+          <button class="btn" @click="refreshNow" :disabled="refreshing">Refresh now</button>
+          <button class="btn" @click="toggleAutoRefresh">{{ autoRefresh ? 'Pause' : 'Resume' }}</button>
+          <label class="control-inline">
+            Interval
+            <select v-model.number="refreshMs">
+              <option :value="1000">1s</option>
+              <option :value="2000">2s</option>
+              <option :value="5000">5s</option>
+              <option :value="10000">10s</option>
+            </select>
+          </label>
+          <span class="refresh-meta">{{ lastUpdatedText }}</span>
+        </div>
+      </section>
+
       <div v-if="loading" class="loading">Loading…</div>
       <template v-else>
-        <div class="grid-4" style="margin-bottom:16px">
-          <div class="stat-card">
+        <div v-if="loadError" class="error-msg">{{ loadError }}</div>
+
+        <section class="overview-grid">
+          <div class="quick-card">
             <div class="stat-label">Health</div>
-            <div class="stat-value">
-              <span class="badge" :class="statusBadgeClass(health?.status)">
-                {{ health?.status || 'Unknown' }}
-              </span>
+            <div class="metric-value"><span class="badge" :class="statusBadgeClass(health?.status)">{{ health?.status || 'UNKNOWN' }}</span></div>
+            <div class="stat-sub">{{ healthComponents.length }} components</div>
+          </div>
+          <div class="quick-card">
+            <div class="stat-label">Uptime</div>
+            <div class="metric-value">{{ fmtUptime(info?.uptime) }}</div>
+            <div class="stat-sub">Started {{ startedAt }}</div>
+          </div>
+          <div class="quick-card">
+            <div class="stat-label">Heap Used</div>
+            <div class="metric-value">{{ fmtBytes(latestSnap?.heapUsed) }}</div>
+            <div class="stat-sub">{{ heapUsedPercentText }} of {{ fmtBytes(latestSnap?.heapMax) }}</div>
+          </div>
+          <div class="quick-card">
+            <div class="stat-label">CPU</div>
+            <div class="metric-value">{{ fmtPercent(latestSnap?.cpuProcess) }}</div>
+            <div class="stat-sub">System {{ fmtPercent(latestSnap?.cpuSystem) }}</div>
+          </div>
+          <div class="quick-card">
+            <div class="stat-label">Threads</div>
+            <div class="metric-value">{{ fmtInteger(latestSnap?.threadsLive) }}</div>
+            <div class="stat-sub">Daemon {{ fmtInteger(latestSnap?.threadsDaemon) }} · Peak {{ fmtInteger(latestSnap?.threadsPeak) }}</div>
+          </div>
+          <div class="quick-card">
+            <div class="stat-label">Alerts</div>
+            <div class="metric-value">{{ activeAlertsCount }}</div>
+            <div class="stat-sub">{{ alertsUnavailable ? 'Alert endpoint unavailable' : 'Firing rules' }}</div>
+          </div>
+        </section>
+
+        <section class="gauge-grid">
+          <div class="card gauge-card">
+            <div class="card-title">Heap Pressure</div>
+            <div class="gauge-wrap">
+              <canvas ref="heapGaugeCanvas"></canvas>
+              <div class="gauge-center">{{ heapUsedPercentText }}</div>
             </div>
           </div>
-          <div class="stat-card">
-            <div class="stat-label">Uptime</div>
-            <div class="stat-value" style="font-size:18px">{{ fmtUptime(info?.uptimeMs) }}</div>
+          <div class="card gauge-card">
+            <div class="card-title">CPU Pressure</div>
+            <div class="gauge-wrap">
+              <canvas ref="cpuGaugeCanvas"></canvas>
+              <div class="gauge-center">{{ fmtPercent(latestSnap?.cpuProcess) }}</div>
+            </div>
           </div>
-          <div class="stat-card">
-            <div class="stat-label">Heap Used</div>
-            <div class="stat-value" style="font-size:18px">{{ fmtBytes(latestSnap?.heapUsed) }}</div>
-            <div class="stat-sub">of {{ fmtBytes(latestSnap?.heapMax) }}</div>
+          <div class="card gauge-card status-board">
+            <div class="card-title">Subsystem Status</div>
+            <div class="status-board-grid">
+              <div v-for="[name, comp] in healthComponents" :key="name" class="status-tile" :class="statusToneClass(comp.status)">
+                <span class="status-tile-name">{{ name }}</span>
+                <span class="status-tile-state">{{ comp.status || 'UNKNOWN' }}</span>
+              </div>
+              <div v-if="!healthComponents.length" class="status-empty">No health component details available.</div>
+            </div>
           </div>
-          <div class="stat-card">
-            <div class="stat-label">App Version</div>
-            <div class="stat-value" style="font-size:16px">{{ info?.version || '—' }}</div>
-            <div class="stat-sub">{{ info?.name || '' }}</div>
+        </section>
+
+        <section class="dashboard-chart-grid">
+          <div class="card chart-card chart-card-wide">
+            <div class="card-title">Heap Memory Trend</div>
+            <div class="chart-stage chart-stage-lg">
+              <canvas ref="heapCanvas"></canvas>
+            </div>
           </div>
-        </div>
-        <div class="grid-3 chart-row" style="margin-bottom:16px">
           <div class="card chart-card">
-            <div class="card-title">Heap Memory</div>
-            <canvas ref="heapCanvas"></canvas>
+            <div class="card-title">CPU Trend</div>
+            <div class="chart-stage chart-stage-md">
+              <canvas ref="cpuCanvas"></canvas>
+            </div>
           </div>
           <div class="card chart-card">
-            <div class="card-title">Threads</div>
-            <canvas ref="threadCanvas"></canvas>
+            <div class="card-title">Thread Trend</div>
+            <div class="chart-stage chart-stage-md">
+              <canvas ref="threadCanvas"></canvas>
+            </div>
           </div>
-          <div class="card chart-card">
-            <div class="card-title">CPU Usage</div>
-            <canvas ref="cpuCanvas"></canvas>
-          </div>
-        </div>
-        <div class="card" v-if="health?.components">
-          <div class="card-title">Components</div>
-          <table>
-            <thead><tr><th>Component</th><th>Status</th></tr></thead>
-            <tbody>
-              <tr v-for="(comp, name) in health.components" :key="name">
-                <td>{{ name }}</td>
-                <td><span class="badge" :class="statusBadgeClass(comp.status)">{{ comp.status }}</span></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        </section>
+
         <div class="card" v-if="info">
-          <div class="card-title">JVM Info</div>
+          <div class="card-title">Runtime Metadata</div>
           <table>
             <tbody>
-              <tr v-for="(val, key) in jvmInfo" :key="key">
+              <tr v-for="(val, key) in runtimeMeta" :key="key">
                 <td style="width:200px;color:var(--text-muted)">{{ key }}</td>
                 <td class="code">{{ val }}</td>
               </tr>
@@ -149,41 +240,86 @@ const DashboardPage = {
     </div>
   `,
   setup() {
-    const loading    = ref(true);
+    const loading = ref(true);
     const refreshing = ref(false);
-    const health     = ref(null);
-    const info       = ref(null);
+    const health = ref(null);
+    const info = ref(null);
+    const alerts = ref([]);
+    const alertsUnavailable = ref(false);
     const latestSnap = ref(null);
+    const loadError = ref('');
+    const lastUpdated = ref(null);
+    const refreshMs = ref(DEFAULT_REFRESH_MS);
+    const autoRefresh = ref(true);
 
-    const jvmInfo = computed(() => {
-      if (!info.value) return {};
-      const i = info.value;
+    const appLabel = computed(() => {
+      if (!info.value) return 'Spring Application · pending metadata';
+      const appName = info.value.appName || info.value.build?.name || 'Spring Application';
+      const version = info.value.build?.version || info.value.git?.commit?.id || 'unknown version';
+      return `${appName} · ${version}`;
+    });
+
+    const startedAt = computed(() => {
+      const start = info.value?.startTime;
+      return start ? new Date(start).toLocaleString() : '—';
+    });
+
+    const healthComponents = computed(() => Object.entries(health.value?.components || {}));
+    const activeAlertsCount = computed(() => (alerts.value || []).filter(a => !!a.firing).length);
+    const heapUsedPercent = computed(() => ratioPercent(latestSnap.value?.heapUsed, latestSnap.value?.heapMax));
+    const heapUsedPercentText = computed(() => heapUsedPercent.value == null ? '—' : `${heapUsedPercent.value.toFixed(1)}%`);
+    const lastUpdatedText = computed(() => lastUpdated.value ? `updated ${lastUpdated.value.toLocaleTimeString()}` : 'awaiting first update');
+
+    const runtimeMeta = computed(() => {
+      const i = info.value || {};
+      const j = i.jvm || {};
       return {
-        'JVM Vendor': i.jvmVendor, 'JVM Version': i.jvmVersion,
-        'Java Version': i.javaVersion, 'OS': i.osName + ' ' + i.osVersion,
-        'Processors': i.availableProcessors, 'PID': i.pid,
+        'Application': i.appName || i.build?.name || '—',
+        'Version': i.build?.version || '—',
+        'Git Commit': i.git?.commit?.id || '—',
+        'JVM Vendor': j.vendor || '—',
+        'JVM': j.vmName || '—',
+        'Java Version': j.version || '—',
+        'Start Time': startedAt.value,
       };
     });
 
     // Rolling arrays — plain arrays, not reactive refs (Chart.js reads by reference)
-    const chartLabels      = [];
-    const heapUsedData     = [];
-    const heapMaxData      = [];
-    const threadLiveData   = [];
+    const chartLabels = [];
+    const heapUsedData = [];
+    const heapCommittedData = [];
+    const heapMaxData = [];
+    const threadLiveData = [];
     const threadDaemonData = [];
-    const cpuProcessData   = [];
-    const cpuSystemData    = [];
+    const cpuProcessData = [];
+    const cpuSystemData = [];
 
-    const heapCanvas   = ref(null);
+    const heapCanvas = ref(null);
     const threadCanvas = ref(null);
-    const cpuCanvas    = ref(null);
+    const cpuCanvas = ref(null);
+    const heapGaugeCanvas = ref(null);
+    const cpuGaugeCanvas = ref(null);
 
-    let heapChart   = null;
+    let heapChart = null;
     let threadChart = null;
-    let cpuChart    = null;
-    let intervalId  = null;
+    let cpuChart = null;
+    let heapGaugeChart = null;
+    let cpuGaugeChart = null;
+    let pollTimer = null;
+    let inFlight = false;
+    let staticCycle = 0;
 
-    function makeChart(canvas, datasets, formatTick) {
+    function chartTheme() {
+      return {
+        axis: cssVar('--chart-axis', '#8ba3cb'),
+        grid: cssVar('--chart-grid', 'rgba(139,163,203,0.18)'),
+        tooltip: cssVar('--tooltip-bg', '#0d1323'),
+        gaugeTrack: cssVar('--gauge-track', 'rgba(139,163,203,0.2)'),
+      };
+    }
+
+    function makeLineChart(canvas, datasets, formatTick) {
+      const palette = chartTheme();
       return new Chart(canvas, {
         type: 'line',
         data: { labels: chartLabels, datasets },
@@ -193,90 +329,255 @@ const DashboardPage = {
           maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
           plugins: {
-            legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
-            tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${formatTick(ctx.parsed.y)}` } },
+            legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, color: palette.axis } },
+            tooltip: { backgroundColor: palette.tooltip, callbacks: { label: ctx => `${ctx.dataset.label}: ${formatTick(ctx.parsed.y)}` } },
           },
           scales: {
-            x: { ticks: { maxTicksLimit: 6, font: { size: 10 } }, grid: { display: false } },
-            y: { beginAtZero: true, ticks: { callback: formatTick, font: { size: 10 } } },
+            x: { ticks: { maxTicksLimit: 8, font: { size: 10 }, color: palette.axis }, grid: { color: palette.grid } },
+            y: { beginAtZero: true, ticks: { callback: formatTick, font: { size: 10 }, color: palette.axis }, grid: { color: palette.grid } },
           },
         },
       });
     }
 
-    function initCharts() {
-      const line = (color, fill) => ({
-        borderColor: color, backgroundColor: color + '33',
-        borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: fill || false,
+    function makeGaugeChart(canvas, color) {
+      const palette = chartTheme();
+      return new Chart(canvas, {
+        type: 'doughnut',
+        data: {
+          labels: ['active', 'remaining'],
+          datasets: [{ data: [0, 100], backgroundColor: [color, palette.gaugeTrack], borderWidth: 0 }],
+        },
+        options: {
+          animation: false,
+          cutout: '74%',
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: ctx => `${ctx.label}: ${ctx.parsed.toFixed(1)}%` } },
+          },
+        },
       });
-      heapChart = makeChart(heapCanvas.value, [
-        { label: 'Used', data: heapUsedData,  ...line('#4a6fa5', true) },
-        { label: 'Max',  data: heapMaxData,   ...line('#a0aec0') },
+    }
+
+    function lineStyle(color, fill) {
+      return {
+        borderColor: color,
+        backgroundColor: `${color}35`,
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.36,
+        fill: !!fill,
+      };
+    }
+
+    function missingCanvasRefs() {
+      const refs = {
+        heapCanvas: heapCanvas.value,
+        cpuCanvas: cpuCanvas.value,
+        threadCanvas: threadCanvas.value,
+        heapGaugeCanvas: heapGaugeCanvas.value,
+        cpuGaugeCanvas: cpuGaugeCanvas.value,
+      };
+      return Object.entries(refs)
+        .filter(([, val]) => !val)
+        .map(([key]) => key);
+    }
+
+    async function initCharts() {
+      let missing = missingCanvasRefs();
+      if (missing.length > 0) {
+        await Vue.nextTick();
+        missing = missingCanvasRefs();
+      }
+
+      if (missing.length > 0) {
+        const msg = `Chart initialization skipped (missing canvas refs: ${missing.join(', ')})`;
+        console.warn(msg);
+        if (!loadError.value) loadError.value = msg;
+        return false;
+      }
+
+      heapChart = makeLineChart(heapCanvas.value, [
+        { label: 'Used', data: heapUsedData, ...lineStyle('#4dd3ff', true) },
+        { label: 'Committed', data: heapCommittedData, ...lineStyle('#36c76f') },
+        { label: 'Max', data: heapMaxData, ...lineStyle('#a2b5d6') },
       ], v => v == null ? '—' : fmtBytes(v));
-      threadChart = makeChart(threadCanvas.value, [
-        { label: 'Live',   data: threadLiveData,   ...line('#38a169') },
-        { label: 'Daemon', data: threadDaemonData, ...line('#d69e2e') },
+      cpuChart = makeLineChart(cpuCanvas.value, [
+        { label: 'Process', data: cpuProcessData, ...lineStyle('#ff5f6d') },
+        { label: 'System', data: cpuSystemData, ...lineStyle('#f4c15f') },
+      ], v => v == null ? '—' : fmtPercent(v));
+      threadChart = makeLineChart(threadCanvas.value, [
+        { label: 'Live', data: threadLiveData, ...lineStyle('#31d28f') },
+        { label: 'Daemon', data: threadDaemonData, ...lineStyle('#ffc857') },
       ], v => v == null ? '—' : Math.round(v));
-      cpuChart = makeChart(cpuCanvas.value, [
-        { label: 'Process', data: cpuProcessData, ...line('#e53e3e') },
-        { label: 'System',  data: cpuSystemData,  ...line('#718096') },
-      ], v => v == null ? '—' : (v * 100).toFixed(1) + '%');
+      heapGaugeChart = makeGaugeChart(heapGaugeCanvas.value, '#4dd3ff');
+      cpuGaugeChart = makeGaugeChart(cpuGaugeCanvas.value, '#ff5f6d');
+      applyChartTheme();
+      return true;
+    }
+
+    function applyChartTheme() {
+      const palette = chartTheme();
+      const charts = [heapChart, threadChart, cpuChart];
+      charts.forEach((chart) => {
+        if (!chart) return;
+        chart.options.plugins.legend.labels.color = palette.axis;
+        chart.options.plugins.tooltip.backgroundColor = palette.tooltip;
+        chart.options.scales.x.ticks.color = palette.axis;
+        chart.options.scales.y.ticks.color = palette.axis;
+        chart.options.scales.x.grid.color = palette.grid;
+        chart.options.scales.y.grid.color = palette.grid;
+        chart.update('none');
+      });
+      [heapGaugeChart, cpuGaugeChart].forEach((chart) => {
+        if (!chart) return;
+        chart.data.datasets[0].backgroundColor[1] = palette.gaugeTrack;
+        chart.update('none');
+      });
+    }
+
+    function setGaugeValue(chart, value) {
+      if (!chart) return;
+      const clamped = Math.max(0, Math.min(100, Number(value) || 0));
+      chart.data.datasets[0].data[0] = clamped;
+      chart.data.datasets[0].data[1] = 100 - clamped;
+      chart.update('none');
     }
 
     function applySnapshot(snap) {
       pushWindow(chartLabels,      new Date(snap.timestamp).toLocaleTimeString());
       pushWindow(heapUsedData,     snap.heapUsed     ?? null);
+      pushWindow(heapCommittedData, snap.heapCommitted ?? null);
       pushWindow(heapMaxData,      snap.heapMax      ?? null);
       pushWindow(threadLiveData,   snap.threadsLive  ?? null);
       pushWindow(threadDaemonData, snap.threadsDaemon ?? null);
       pushWindow(cpuProcessData,   snap.cpuProcess   ?? null);
       pushWindow(cpuSystemData,    snap.cpuSystem    ?? null);
       latestSnap.value = snap;
+
       if (heapChart)   heapChart.update('none');
       if (threadChart) threadChart.update('none');
       if (cpuChart)    cpuChart.update('none');
+
+      const heapP = ratioPercent(snap.heapUsed, snap.heapMax);
+      setGaugeValue(heapGaugeChart, heapP == null ? 0 : heapP);
+      setGaugeValue(cpuGaugeChart, (Number(snap.cpuProcess) || 0) * 100);
     }
 
     const loadStatic = async () => {
-      try {
-        const [h, inf] = await Promise.all([apiFetch('health'), apiFetch('info')]);
-        health.value = h.data;
-        info.value   = inf.data;
-      } catch (e) { console.error('Dashboard static load error:', e); }
+      const [hRes, iRes, aRes] = await Promise.allSettled([
+        apiFetch('health'),
+        apiFetch('info'),
+        apiFetch('alerts'),
+      ]);
+
+      if (hRes.status === 'fulfilled' && hRes.value.status === 'ok') {
+        health.value = hRes.value.data;
+      }
+      if (iRes.status === 'fulfilled' && iRes.value.status === 'ok') {
+        info.value = iRes.value.data;
+      }
+      if (aRes.status === 'fulfilled') {
+        if (aRes.value.status === 'ok') {
+          alerts.value = aRes.value.data || [];
+          alertsUnavailable.value = false;
+        } else {
+          alerts.value = [];
+          alertsUnavailable.value = true;
+        }
+      } else {
+        alertsUnavailable.value = true;
+      }
     };
 
     const loadSnapshot = async () => {
-      refreshing.value = true;
-      try {
-        const r = await apiFetch('snapshot');
-        if (r.status === 'ok' && r.data) applySnapshot(r.data);
-      } catch (e) { console.error('Snapshot fetch error:', e); }
-      refreshing.value = false;
+      const r = await apiFetch('snapshot');
+      if (r.status !== 'ok' || !r.data) {
+        throw new Error('snapshot endpoint unavailable');
+      }
+      applySnapshot(r.data);
     };
 
-    onMounted(async () => {
-      loading.value = true;
-      await Promise.all([loadStatic(), loadSnapshot()]);
-      loading.value = false;
-      await Vue.nextTick();
-      initCharts();
-      intervalId = setInterval(async () => {
+    const scheduleNextPoll = () => {
+      clearTimeout(pollTimer);
+      if (!autoRefresh.value || loading.value) return;
+      pollTimer = setTimeout(() => { void poll(false); }, refreshMs.value);
+    };
+
+    const poll = async (forceStatic) => {
+      if (inFlight) return;
+      inFlight = true;
+      refreshing.value = true;
+      try {
         await loadSnapshot();
-        await loadStatic();
-      }, REFRESH_MS);
+        if (forceStatic || staticCycle % STATIC_POLL_EVERY === 0) {
+          await loadStatic();
+        }
+        staticCycle += 1;
+        lastUpdated.value = new Date();
+        if (!loadError.value || !loadError.value.startsWith('Chart initialization skipped')) {
+          loadError.value = '';
+        }
+      } catch (e) {
+        loadError.value = `Live refresh failed: ${e.message}`;
+      } finally {
+        refreshing.value = false;
+        inFlight = false;
+        scheduleNextPoll();
+      }
+    };
+
+    const refreshNow = async () => {
+      clearTimeout(pollTimer);
+      await poll(true);
+    };
+
+    const toggleAutoRefresh = () => {
+      autoRefresh.value = !autoRefresh.value;
+      if (autoRefresh.value) scheduleNextPoll();
+      else clearTimeout(pollTimer);
+    };
+
+    const themeHandler = () => applyChartTheme();
+
+    onMounted(async () => {
+      window.addEventListener('monitro-theme-change', themeHandler);
+      loading.value = true;
+      try {
+        await Promise.all([loadStatic(), loadSnapshot()]);
+        lastUpdated.value = new Date();
+      } catch (e) {
+        loadError.value = `Dashboard bootstrap failed: ${e.message}`;
+      } finally {
+        loading.value = false;
+      }
+
+      await Vue.nextTick();
+      await initCharts();
+      scheduleNextPoll();
     });
 
     onUnmounted(() => {
-      clearInterval(intervalId);
+      window.removeEventListener('monitro-theme-change', themeHandler);
+      clearTimeout(pollTimer);
       if (heapChart)   { heapChart.destroy();   heapChart   = null; }
       if (threadChart) { threadChart.destroy();  threadChart = null; }
       if (cpuChart)    { cpuChart.destroy();     cpuChart    = null; }
+      if (heapGaugeChart) { heapGaugeChart.destroy(); heapGaugeChart = null; }
+      if (cpuGaugeChart) { cpuGaugeChart.destroy(); cpuGaugeChart = null; }
+    });
+
+    watch(refreshMs, () => {
+      if (autoRefresh.value && !loading.value) scheduleNextPoll();
     });
 
     return {
-      loading, refreshing, health, info, latestSnap, jvmInfo,
-      heapCanvas, threadCanvas, cpuCanvas,
-      statusBadgeClass, fmtUptime, fmtBytes,
+      loading, refreshing, health, info, latestSnap, runtimeMeta,
+      heapCanvas, threadCanvas, cpuCanvas, heapGaugeCanvas, cpuGaugeCanvas,
+      refreshMs, autoRefresh, lastUpdatedText, loadError,
+      appLabel, startedAt, healthComponents, activeAlertsCount, alertsUnavailable, heapUsedPercentText,
+      statusBadgeClass, statusToneClass, fmtUptime, fmtBytes, fmtPercent, fmtInteger,
+      refreshNow, toggleAutoRefresh,
     };
   },
 };
@@ -673,8 +974,11 @@ const router = createRouter({
 const App = {
   template: `
     <div class="layout">
-      <nav class="nav">
-        <div class="nav-logo">Spring<span>-Monitro</span></div>
+      <aside class="nav">
+        <div class="nav-brand">
+          <div class="nav-logo">Spring<span>-Monitro</span></div>
+          <div class="nav-caption">Runtime observability panel</div>
+        </div>
         <div class="nav-links">
           <router-link v-for="item in navItems" :key="item.path"
             :to="item.path" class="nav-link" active-class="active" exact-active-class="active">
@@ -682,13 +986,23 @@ const App = {
             {{ item.label }}
           </router-link>
         </div>
-      </nav>
-      <main class="main">
-        <router-view />
-      </main>
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <div>
+            <div class="topbar-title">{{ activeRouteLabel }}</div>
+            <div class="topbar-subtitle">Live monitoring, diagnostics and controls</div>
+          </div>
+          <button class="btn theme-btn" @click="toggleTheme">{{ themeButtonLabel }}</button>
+        </header>
+        <main class="main">
+          <router-view />
+        </main>
+      </div>
     </div>
   `,
   setup() {
+    const route = useRoute();
     const navItems = [
       { path: '/', label: 'Dashboard', icon: '◉' },
       { path: '/health', label: 'Health', icon: '♥' },
@@ -698,7 +1012,47 @@ const App = {
       { path: '/threaddump', label: 'Thread Dump', icon: '⊘' },
       { path: '/alerts', label: 'Alerts', icon: '⚑' },
     ];
-    return { navItems };
+
+    const activeRouteLabel = computed(() => {
+      const item = navItems.find(n => n.path === route.path);
+      return item ? item.label : 'Dashboard';
+    });
+
+    const readStoredTheme = () => {
+      try {
+        const value = localStorage.getItem(THEME_STORAGE_KEY);
+        return value === 'dark' || value === 'light' ? value : null;
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const defaultTheme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light';
+    const theme = ref(readStoredTheme() || defaultTheme);
+    const themeButtonLabel = computed(() => theme.value === 'dark' ? 'Switch to light' : 'Switch to dark');
+
+    const applyTheme = (next) => {
+      document.documentElement.setAttribute('data-theme', next);
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, next);
+      } catch (_) {}
+      window.dispatchEvent(new Event('monitro-theme-change'));
+    };
+
+    const toggleTheme = () => {
+      theme.value = theme.value === 'dark' ? 'light' : 'dark';
+    };
+
+    watch(theme, applyTheme, { immediate: true });
+
+    return {
+      navItems,
+      activeRouteLabel,
+      themeButtonLabel,
+      toggleTheme,
+    };
   },
 };
 
