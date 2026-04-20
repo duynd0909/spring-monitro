@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.spring.monitro</groupId>
+        <groupId>io.github.duynd0909</groupId>
         <artifactId>spring-monitro</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
@@ -16,27 +16,27 @@
 
     <dependencies>
         <dependency>
-            <groupId>com.spring.monitro</groupId>
+            <groupId>io.github.duynd0909</groupId>
             <artifactId>monitor-core</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.spring.monitro</groupId>
+            <groupId>io.github.duynd0909</groupId>
             <artifactId>monitor-server</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.spring.monitro</groupId>
+            <groupId>io.github.duynd0909</groupId>
             <artifactId>monitor-actuator</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.spring.monitro</groupId>
+            <groupId>io.github.duynd0909</groupId>
             <artifactId>monitor-security</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.spring.monitro</groupId>
+            <groupId>io.github.duynd0909</groupId>
             <artifactId>monitor-alerting</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.spring.monitro</groupId>
+            <groupId>io.github.duynd0909</groupId>
             <artifactId>monitor-ui</artifactId>
         </dependency>
 

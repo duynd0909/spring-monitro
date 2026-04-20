@@ -99,3 +99,10 @@ select:focus { outline: none; border-color: var(--primary); }
 .stack-frame { font-size: 11px; font-family: 'SFMono-Regular', Consolas, monospace; color: var(--text-muted); padding: 1px 0; }
 
 .refresh-info { font-size: 11px; color: var(--text-muted); float: right; margin-top: 4px; }
+
+/* ── Live dashboard charts ── */
+.chart-card { padding: 16px; min-height: 220px; display: flex; flex-direction: column; }
+.chart-card canvas { flex: 1; min-height: 0; width: 100% !important; }
+.refresh-badge { font-size: 11px; font-weight: 500; color: var(--text-muted); margin-left: 12px; vertical-align: middle; transition: color 0.3s; }
+.refresh-badge.refresh-active { color: var(--status-up); }
+@media (max-width: 900px) { .chart-row { grid-template-columns: 1fr !important; } }

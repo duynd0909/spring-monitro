@@ -63,12 +63,25 @@ function fmtUptime(ms) {
   return `${sec}s`;
 }
 
+// ── Dashboard realtime constants ──────────────────────────────────────────────
+
+const REFRESH_MS   = 5000;
+const CHART_WINDOW = 30;
+
+function pushWindow(arr, val) {
+  arr.push(val);
+  if (arr.length > CHART_WINDOW) arr.shift();
+}
+
 // ── Dashboard page ────────────────────────────────────────────────────────────
 
 const DashboardPage = {
   template: `
     <div>
-      <div class="page-title">Dashboard</div>
+      <div class="page-title">
+        Dashboard
+        <span class="refresh-badge" :class="{ 'refresh-active': refreshing }">● live</span>
+      </div>
       <div v-if="loading" class="loading">Loading…</div>
       <template v-else>
         <div class="grid-4" style="margin-bottom:16px">
@@ -86,13 +99,27 @@ const DashboardPage = {
           </div>
           <div class="stat-card">
             <div class="stat-label">Heap Used</div>
-            <div class="stat-value" style="font-size:18px">{{ fmtBytes(heapUsed) }}</div>
-            <div class="stat-sub">of {{ fmtBytes(heapMax) }}</div>
+            <div class="stat-value" style="font-size:18px">{{ fmtBytes(latestSnap?.heapUsed) }}</div>
+            <div class="stat-sub">of {{ fmtBytes(latestSnap?.heapMax) }}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">App Version</div>
             <div class="stat-value" style="font-size:16px">{{ info?.version || '—' }}</div>
             <div class="stat-sub">{{ info?.name || '' }}</div>
+          </div>
+        </div>
+        <div class="grid-3 chart-row" style="margin-bottom:16px">
+          <div class="card chart-card">
+            <div class="card-title">Heap Memory</div>
+            <canvas ref="heapCanvas"></canvas>
+          </div>
+          <div class="card chart-card">
+            <div class="card-title">Threads</div>
+            <canvas ref="threadCanvas"></canvas>
+          </div>
+          <div class="card chart-card">
+            <div class="card-title">CPU Usage</div>
+            <canvas ref="cpuCanvas"></canvas>
           </div>
         </div>
         <div class="card" v-if="health?.components">
@@ -122,8 +149,12 @@ const DashboardPage = {
     </div>
   `,
   setup() {
-    const loading = ref(true), health = ref(null), info = ref(null);
-    const heapUsed = ref(null), heapMax = ref(null);
+    const loading    = ref(true);
+    const refreshing = ref(false);
+    const health     = ref(null);
+    const info       = ref(null);
+    const latestSnap = ref(null);
+
     const jvmInfo = computed(() => {
       if (!info.value) return {};
       const i = info.value;
@@ -133,22 +164,120 @@ const DashboardPage = {
         'Processors': i.availableProcessors, 'PID': i.pid,
       };
     });
-    const load = async () => {
-      loading.value = true;
+
+    // Rolling arrays — plain arrays, not reactive refs (Chart.js reads by reference)
+    const chartLabels      = [];
+    const heapUsedData     = [];
+    const heapMaxData      = [];
+    const threadLiveData   = [];
+    const threadDaemonData = [];
+    const cpuProcessData   = [];
+    const cpuSystemData    = [];
+
+    const heapCanvas   = ref(null);
+    const threadCanvas = ref(null);
+    const cpuCanvas    = ref(null);
+
+    let heapChart   = null;
+    let threadChart = null;
+    let cpuChart    = null;
+    let intervalId  = null;
+
+    function makeChart(canvas, datasets, formatTick) {
+      return new Chart(canvas, {
+        type: 'line',
+        data: { labels: chartLabels, datasets },
+        options: {
+          animation: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+            tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${formatTick(ctx.parsed.y)}` } },
+          },
+          scales: {
+            x: { ticks: { maxTicksLimit: 6, font: { size: 10 } }, grid: { display: false } },
+            y: { beginAtZero: true, ticks: { callback: formatTick, font: { size: 10 } } },
+          },
+        },
+      });
+    }
+
+    function initCharts() {
+      const line = (color, fill) => ({
+        borderColor: color, backgroundColor: color + '33',
+        borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: fill || false,
+      });
+      heapChart = makeChart(heapCanvas.value, [
+        { label: 'Used', data: heapUsedData,  ...line('#4a6fa5', true) },
+        { label: 'Max',  data: heapMaxData,   ...line('#a0aec0') },
+      ], v => v == null ? '—' : fmtBytes(v));
+      threadChart = makeChart(threadCanvas.value, [
+        { label: 'Live',   data: threadLiveData,   ...line('#38a169') },
+        { label: 'Daemon', data: threadDaemonData, ...line('#d69e2e') },
+      ], v => v == null ? '—' : Math.round(v));
+      cpuChart = makeChart(cpuCanvas.value, [
+        { label: 'Process', data: cpuProcessData, ...line('#e53e3e') },
+        { label: 'System',  data: cpuSystemData,  ...line('#718096') },
+      ], v => v == null ? '—' : (v * 100).toFixed(1) + '%');
+    }
+
+    function applySnapshot(snap) {
+      pushWindow(chartLabels,      new Date(snap.timestamp).toLocaleTimeString());
+      pushWindow(heapUsedData,     snap.heapUsed     ?? null);
+      pushWindow(heapMaxData,      snap.heapMax      ?? null);
+      pushWindow(threadLiveData,   snap.threadsLive  ?? null);
+      pushWindow(threadDaemonData, snap.threadsDaemon ?? null);
+      pushWindow(cpuProcessData,   snap.cpuProcess   ?? null);
+      pushWindow(cpuSystemData,    snap.cpuSystem    ?? null);
+      latestSnap.value = snap;
+      if (heapChart)   heapChart.update('none');
+      if (threadChart) threadChart.update('none');
+      if (cpuChart)    cpuChart.update('none');
+    }
+
+    const loadStatic = async () => {
       try {
         const [h, inf] = await Promise.all([apiFetch('health'), apiFetch('info')]);
-        health.value = h.data; info.value = inf.data;
-        try {
-          const mu = await apiFetch('metrics/jvm.memory.used?tag=area:heap');
-          heapUsed.value = mu.data?.measurements?.[0]?.value;
-          const mm = await apiFetch('metrics/jvm.memory.max?tag=area:heap');
-          heapMax.value = mm.data?.measurements?.[0]?.value;
-        } catch (_) {}
-      } catch (e) { console.error(e); }
-      loading.value = false;
+        health.value = h.data;
+        info.value   = inf.data;
+      } catch (e) { console.error('Dashboard static load error:', e); }
     };
-    onMounted(load);
-    return { loading, health, info, heapUsed, heapMax, jvmInfo, statusBadgeClass, fmtUptime, fmtBytes };
+
+    const loadSnapshot = async () => {
+      refreshing.value = true;
+      try {
+        const r = await apiFetch('snapshot');
+        if (r.status === 'ok' && r.data) applySnapshot(r.data);
+      } catch (e) { console.error('Snapshot fetch error:', e); }
+      refreshing.value = false;
+    };
+
+    onMounted(async () => {
+      loading.value = true;
+      await Promise.all([loadStatic(), loadSnapshot()]);
+      loading.value = false;
+      await Vue.nextTick();
+      initCharts();
+      intervalId = setInterval(async () => {
+        await loadSnapshot();
+        await loadStatic();
+      }, REFRESH_MS);
+    });
+
+    onUnmounted(() => {
+      clearInterval(intervalId);
+      if (heapChart)   { heapChart.destroy();   heapChart   = null; }
+      if (threadChart) { threadChart.destroy();  threadChart = null; }
+      if (cpuChart)    { cpuChart.destroy();     cpuChart    = null; }
+    });
+
+    return {
+      loading, refreshing, health, info, latestSnap, jvmInfo,
+      heapCanvas, threadCanvas, cpuCanvas,
+      statusBadgeClass, fmtUptime, fmtBytes,
+    };
   },
 };
 

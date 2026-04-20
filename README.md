@@ -33,9 +33,9 @@ Your JVM Process
 
 ```xml
 <dependency>
-    <groupId>com.spring.monitro</groupId>
+    <groupId>io.github.duynd0909</groupId>
     <artifactId>monitor-starter</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.0</version>
 </dependency>
 ```
 
@@ -261,53 +261,37 @@ Spring-Monitro targets Servlet-based (Tomcat/Jetty/Undertow) apps only. WebFlux 
 
 ---
 
-## Publish to GitHub Packages
+## Publishing
 
-This repository is configured to deploy Maven artifacts to:
-`https://maven.pkg.github.com/duynd0909/spring-monitro`
+### Maven Central (releases)
 
-### 1. Configure Maven credentials
-
-Create/update `~/.m2/settings.xml`:
-
-```xml
-<settings>
-  <servers>
-    <server>
-      <id>github</id>
-      <username>YOUR_GITHUB_USERNAME</username>
-      <password>YOUR_GITHUB_TOKEN</password>
-    </server>
-  </servers>
-</settings>
-```
-
-Token requirement: a PAT with `write:packages` (and `read:packages` for consuming private packages).
-
-### 2. Deploy package artifacts
+Artifacts are published to Maven Central automatically when a version tag is pushed:
 
 ```bash
-mvn -DskipTests deploy
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-The `monitor-sample` module is automatically skipped from deploy.
+The GitHub Actions workflow (`.github/workflows/publish-maven-central.yml`) sets the release version from the tag, signs all artifacts with GPG, and deploys via the Sonatype Central Portal. The artifact is live on Maven Central in ~10–30 minutes.
 
-### 3. Consume in another project
+**Required GitHub Secrets:**
 
-```xml
-<repositories>
-  <repository>
-    <id>github</id>
-    <url>https://maven.pkg.github.com/duynd0909/spring-monitro</url>
-  </repository>
-</repositories>
+| Secret | Description |
+|--------|-------------|
+| `CENTRAL_USERNAME` | Sonatype Central Portal user token username |
+| `CENTRAL_PASSWORD` | Sonatype Central Portal user token password |
+| `GPG_PRIVATE_KEY` | ASCII-armored GPG private key (`gpg --export-secret-keys --armor`) |
+| `GPG_PASSPHRASE` | GPG key passphrase |
 
-<dependency>
-  <groupId>com.spring.monitro</groupId>
-  <artifactId>monitor-starter</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
-</dependency>
+### GitHub Packages (snapshots)
+
+Snapshot builds can still be deployed to GitHub Packages manually:
+
+```bash
+mvn -DskipTests deploy -Ddistribution.url=https://maven.pkg.github.com/duynd0909/spring-monitro
 ```
+
+The `monitor-sample` module is automatically skipped from all deploys.
 
 ---
 

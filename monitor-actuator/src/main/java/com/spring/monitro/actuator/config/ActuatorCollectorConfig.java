@@ -60,6 +60,9 @@ public class ActuatorCollectorConfig {
             tryRegister("info",
                     org.springframework.boot.actuate.info.InfoEndpoint.class,
                     InfoCollector::new);
+            tryRegister("snapshot",
+                    org.springframework.boot.actuate.metrics.MetricsEndpoint.class,
+                    SnapshotCollector::new);
         }
 
         private <T> void tryRegister(String id, Class<T> endpointClass,

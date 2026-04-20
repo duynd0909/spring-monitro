@@ -11,7 +11,7 @@
         <relativePath/>
     </parent>
 
-    <groupId>com.spring.monitro</groupId>
+    <groupId>io.github.duynd0909</groupId>
     <artifactId>spring-monitro</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
@@ -31,6 +31,7 @@
         <developer>
             <id>duynd0909</id>
             <name>duynd0909</name>
+            <email>duynd0909@gmail.com</email>
             <url>https://github.com/duynd0909</url>
         </developer>
     </developers>
@@ -54,15 +55,9 @@
     </modules>
 
     <distributionManagement>
-        <repository>
-            <id>github</id>
-            <name>GitHub Packages</name>
-            <url>https://maven.pkg.github.com/duynd0909/spring-monitro</url>
-        </repository>
         <snapshotRepository>
-            <id>github</id>
-            <name>GitHub Packages Snapshots</name>
-            <url>https://maven.pkg.github.com/duynd0909/spring-monitro</url>
+            <id>central</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
         </snapshotRepository>
     </distributionManagement>
 
@@ -76,37 +71,37 @@
         <dependencies>
             <!-- Cross-module version alignment -->
             <dependency>
-                <groupId>com.spring.monitro</groupId>
+                <groupId>io.github.duynd0909</groupId>
                 <artifactId>monitor-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.spring.monitro</groupId>
+                <groupId>io.github.duynd0909</groupId>
                 <artifactId>monitor-actuator</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.spring.monitro</groupId>
+                <groupId>io.github.duynd0909</groupId>
                 <artifactId>monitor-server</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.spring.monitro</groupId>
+                <groupId>io.github.duynd0909</groupId>
                 <artifactId>monitor-ui</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.spring.monitro</groupId>
+                <groupId>io.github.duynd0909</groupId>
                 <artifactId>monitor-security</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.spring.monitro</groupId>
+                <groupId>io.github.duynd0909</groupId>
                 <artifactId>monitor-alerting</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.spring.monitro</groupId>
+                <groupId>io.github.duynd0909</groupId>
                 <artifactId>monitor-starter</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -149,7 +144,6 @@
                     <source>${java.version}</source>
                     <failOnError>false</failOnError>
                     <doclint>none</doclint>
-                    <!-- Avoid cross-module offline-link resolution that invokes javadoc in dependent reactor modules. -->
                     <detectOfflineLinks>false</detectOfflineLinks>
                 </configuration>
                 <executions>
@@ -161,6 +155,48 @@
                     </execution>
                 </executions>
             </plugin>
+
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>0.6.0</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>central</publishingServerId>
+                    <autoPublish>true</autoPublish>
+                    <waitUntil>published</waitUntil>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.7</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                                <configuration>
+                                    <gpgArguments>
+                                        <arg>--pinentry-mode</arg>
+                                        <arg>loopback</arg>
+                                    </gpgArguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
