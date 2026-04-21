@@ -10,8 +10,8 @@
         <version>0.1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>monitor-starter</artifactId>
-    <name>Monitor Starter</name>
+    <artifactId>spring-monitro-starter</artifactId>
+    <name>Spring Monitro Starter</name>
     <description>Auto-configuration entry point — the only module users reference in their pom.xml</description>
 
     <dependencies>
