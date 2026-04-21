@@ -34,8 +34,13 @@ public class ThreadDumpCollector implements MonitorDataCollector<ThreadData> {
                         t.getPriority(),
                         Arrays.stream(t.getStackTrace())
                                 .map(StackTraceElement::toString)
-                                .limit(30)   // cap stack depth to keep payload manageable
-                                .toList()
+                                .limit(30)
+                                .toList(),
+                        t.getLockName(),
+                        t.getLockOwnerId(),
+                        t.getLockOwnerName(),
+                        t.getBlockedCount(),
+                        t.getWaitedCount()
                 ))
                 .toList();
 

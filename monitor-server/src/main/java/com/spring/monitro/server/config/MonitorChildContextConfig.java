@@ -13,6 +13,7 @@ import org.springframework.context.support.PropertySourcesPlaceholderConfigurer;
 import org.springframework.web.servlet.DispatcherServlet;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
+import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
@@ -74,6 +75,11 @@ public class MonitorChildContextConfig implements WebMvcConfigurer {
      * Serve static UI assets from the monitor-ui jar at /META-INF/resources/monitro/.
      * Effective for M3+ when monitor-ui is on the classpath.
      */
+    @Override
+    public void addViewControllers(ViewControllerRegistry registry) {
+        registry.addRedirectViewController("/", "/index.html");
+    }
+
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
         registry.addResourceHandler("/*.html", "/*.ico")

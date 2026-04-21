@@ -18,6 +18,11 @@ public class ThreadData {
             String threadState,
             boolean daemon,
             int priority,
-            List<String> stackTrace
+            List<String> stackTrace,
+            String lockName,
+            long lockOwnerId,
+            String lockOwnerName,
+            long blockedCount,
+            long waitedCount
     ) {}
 }

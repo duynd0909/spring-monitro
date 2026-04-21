@@ -113,6 +113,137 @@ function pushWindow(arr, val) {
   if (arr.length > CHART_WINDOW) arr.shift();
 }
 
+function chartTheme() {
+  return {
+    axis:       cssVar('--chart-axis',  '#8ba3cb'),
+    grid:       cssVar('--chart-grid',  'rgba(139,163,203,0.18)'),
+    tooltip:    cssVar('--tooltip-bg',  '#0d1323'),
+    gaugeTrack: cssVar('--gauge-track', 'rgba(139,163,203,0.2)'),
+  };
+}
+
+// ── Thread Dump helpers ───────────────────────────────────────────────────────
+
+const TD_STATES = ['RUNNABLE','BLOCKED','WAITING','TIMED_WAITING','NEW','TERMINATED'];
+const TD_STATE_COLORS = {
+  RUNNABLE: '#31d28f', BLOCKED: '#ff6c79', WAITING: '#f7bf57',
+  TIMED_WAITING: '#a2b5d6', NEW: '#56d0ff', TERMINATED: '#555e7a',
+};
+const TD_POOL_PATTERNS = [
+  [/http-nio/i,'http-nio'],[/HikariPool/i,'HikariPool'],[/ForkJoinPool/i,'ForkJoinPool'],
+  [/kafka/i,'kafka'],[/reactor-http/i,'reactor-http'],[/grpc/i,'grpc'],
+  [/lettuce/i,'lettuce'],[/scheduler/i,'scheduler'],[/executor/i,'executor'],
+  [/worker/i,'worker'],[/RMI/,'RMI'],[/GC/,'GC'],
+];
+const TD_SNAP_MAX = 60;
+const TD_TREND_WIN = 40;
+
+function tdPool(name) {
+  for (const [re, label] of TD_POOL_PATTERNS) if (re.test(name)) return label;
+  return 'other';
+}
+function tdSig(stack) { return stack.slice(0, 3).join('|'); }
+function tdIsApp(frame) { return /com\.(spring|example)|io\.github/i.test(frame); }
+
+function tdNormalize(raw, ts) {
+  return {
+    threadId: raw.threadId,
+    threadName: raw.threadName,
+    state: raw.threadState || 'UNKNOWN',
+    daemon: !!raw.daemon,
+    priority: raw.priority ?? 5,
+    stack: raw.stackTrace || [],
+    lockName: raw.lockName || null,
+    lockOwnerId: raw.lockOwnerId ?? -1,
+    lockOwnerName: raw.lockOwnerName || null,
+    blockedCount: raw.blockedCount || 0,
+    waitedCount: raw.waitedCount || 0,
+    pool: tdPool(raw.threadName),
+    sig: tdSig(raw.stackTrace || []),
+    seenAt: ts,
+    suspicion: { score: 0, severity: 'none', reasons: [] },
+  };
+}
+
+function tdScore(thread, prevSnaps) {
+  let score = 0;
+  const reasons = [];
+  if (thread.state === 'BLOCKED') { score += 40; reasons.push('BLOCKED'); }
+  else if (thread.state === 'WAITING') score += 3;
+  else if (thread.state === 'TIMED_WAITING') score += 2;
+  if (thread.stack.length > 25) { score += 8; reasons.push('deep stack'); }
+  if (thread.lockName) { score += 15; reasons.push('lock contention'); }
+  if (/http|request|worker|servlet|dispatcher/i.test(thread.threadName) && thread.state !== 'RUNNABLE') {
+    score += 15; reasons.push('request worker stuck');
+  }
+  let unch = 0;
+  for (const s of prevSnaps) {
+    const p = s.threadMap && s.threadMap.get(thread.threadId);
+    if (p && p.sig === thread.sig && p.state === thread.state) unch++;
+    else break;
+  }
+  if (unch >= 10) { score += 35; reasons.push(`stuck ${unch} polls`); }
+  else if (unch >= 5) { score += 20; reasons.push(`stuck ${unch} polls`); }
+  else if (unch >= 3) { score += 10; reasons.push(`stuck ${unch} polls`); }
+  const severity = score >= 70 ? 'critical' : score >= 40 ? 'high' : score >= 20 ? 'medium' : score > 0 ? 'low' : 'none';
+  return { score, severity, reasons };
+}
+
+function tdDeadlocks(threads) {
+  const byId = new Map(threads.map(t => [t.threadId, t]));
+  const deadlocks = [], visited = new Set();
+  for (const start of threads) {
+    if (start.state !== 'BLOCKED' || start.lockOwnerId <= 0 || visited.has(start.threadId)) continue;
+    const chain = [], inChain = new Set();
+    let cur = start;
+    while (cur && cur.state === 'BLOCKED' && cur.lockOwnerId > 0) {
+      if (inChain.has(cur.threadId)) {
+        const idx = chain.findIndex(c => c.threadId === cur.threadId);
+        const cycle = chain.slice(idx);
+        deadlocks.push(cycle);
+        cycle.forEach(c => visited.add(c.threadId));
+        break;
+      }
+      inChain.add(cur.threadId); chain.push(cur);
+      cur = byId.get(cur.lockOwnerId);
+    }
+  }
+  return deadlocks;
+}
+
+function tdBlockedChains(threads) {
+  const byId = new Map(threads.map(t => [t.threadId, t]));
+  return threads
+    .filter(t => t.state === 'BLOCKED' && t.lockOwnerId > 0)
+    .map(t => {
+      const chain = [t], seen = new Set([t.threadId]);
+      let owner = byId.get(t.lockOwnerId);
+      while (owner && !seen.has(owner.threadId)) {
+        chain.push(owner); seen.add(owner.threadId);
+        owner = (owner.state === 'BLOCKED' && owner.lockOwnerId > 0) ? byId.get(owner.lockOwnerId) : null;
+      }
+      return chain;
+    })
+    .filter(c => c.length > 1);
+}
+
+function tdPools(threads) {
+  const groups = {};
+  for (const t of threads) {
+    const g = groups[t.pool] || (groups[t.pool] = { total:0, states:{}, suspicious:0, stacks:{} });
+    g.total++;
+    g.states[t.state] = (g.states[t.state] || 0) + 1;
+    if (t.suspicion.severity !== 'none') g.suspicious++;
+    if (t.sig) g.stacks[t.sig] = (g.stacks[t.sig] || 0) + 1;
+  }
+  for (const g of Object.values(groups)) {
+    const top = Object.entries(g.stacks).sort((a,b) => b[1]-a[1])[0];
+    g.topStack = top ? top[0].split('|')[0] : null;
+    delete g.stacks;
+  }
+  return groups;
+}
+
 // ── Dashboard page ────────────────────────────────────────────────────────────
 
 const DashboardPage = {
@@ -206,19 +337,28 @@ const DashboardPage = {
 
         <section class="dashboard-chart-grid">
           <div class="card chart-card chart-card-wide">
-            <div class="card-title">Heap Memory Trend</div>
+            <div class="card-title-row">
+              <div class="card-title">Heap Memory Trend</div>
+              <button class="btn btn-xs" @click="resetZoom('heap')">Reset zoom</button>
+            </div>
             <div class="chart-stage chart-stage-lg">
               <canvas ref="heapCanvas"></canvas>
             </div>
           </div>
           <div class="card chart-card">
-            <div class="card-title">CPU Trend</div>
+            <div class="card-title-row">
+              <div class="card-title">CPU Trend</div>
+              <button class="btn btn-xs" @click="resetZoom('cpu')">Reset zoom</button>
+            </div>
             <div class="chart-stage chart-stage-md">
               <canvas ref="cpuCanvas"></canvas>
             </div>
           </div>
           <div class="card chart-card">
-            <div class="card-title">Thread Trend</div>
+            <div class="card-title-row">
+              <div class="card-title">Thread Trend</div>
+              <button class="btn btn-xs" @click="resetZoom('thread')">Reset zoom</button>
+            </div>
             <div class="chart-stage chart-stage-md">
               <canvas ref="threadCanvas"></canvas>
             </div>
@@ -288,7 +428,6 @@ const DashboardPage = {
     const chartLabels = [];
     const heapUsedData = [];
     const heapCommittedData = [];
-    const heapMaxData = [];
     const threadLiveData = [];
     const threadDaemonData = [];
     const cpuProcessData = [];
@@ -309,16 +448,7 @@ const DashboardPage = {
     let inFlight = false;
     let staticCycle = 0;
 
-    function chartTheme() {
-      return {
-        axis: cssVar('--chart-axis', '#8ba3cb'),
-        grid: cssVar('--chart-grid', 'rgba(139,163,203,0.18)'),
-        tooltip: cssVar('--tooltip-bg', '#0d1323'),
-        gaugeTrack: cssVar('--gauge-track', 'rgba(139,163,203,0.2)'),
-      };
-    }
-
-    function makeLineChart(canvas, datasets, formatTick) {
+    function makeLineChart(canvas, datasets, formatTick, yOptions = {}) {
       const palette = chartTheme();
       return new Chart(canvas, {
         type: 'line',
@@ -331,10 +461,14 @@ const DashboardPage = {
           plugins: {
             legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, color: palette.axis } },
             tooltip: { backgroundColor: palette.tooltip, callbacks: { label: ctx => `${ctx.dataset.label}: ${formatTick(ctx.parsed.y)}` } },
+            zoom: {
+              zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+              pan: { enabled: true, mode: 'x' },
+            },
           },
           scales: {
             x: { ticks: { maxTicksLimit: 8, font: { size: 10 }, color: palette.axis }, grid: { color: palette.grid } },
-            y: { beginAtZero: true, ticks: { callback: formatTick, font: { size: 10 }, color: palette.axis }, grid: { color: palette.grid } },
+            y: { beginAtZero: true, ticks: { callback: formatTick, font: { size: 10 }, color: palette.axis }, grid: { color: palette.grid }, ...yOptions },
           },
         },
       });
@@ -400,8 +534,7 @@ const DashboardPage = {
       heapChart = makeLineChart(heapCanvas.value, [
         { label: 'Used', data: heapUsedData, ...lineStyle('#4dd3ff', true) },
         { label: 'Committed', data: heapCommittedData, ...lineStyle('#36c76f') },
-        { label: 'Max', data: heapMaxData, ...lineStyle('#a2b5d6') },
-      ], v => v == null ? '—' : fmtBytes(v));
+      ], v => v == null ? '—' : fmtBytes(v), { grace: '10%' });
       cpuChart = makeLineChart(cpuCanvas.value, [
         { label: 'Process', data: cpuProcessData, ...lineStyle('#ff5f6d') },
         { label: 'System', data: cpuSystemData, ...lineStyle('#f4c15f') },
@@ -448,7 +581,6 @@ const DashboardPage = {
       pushWindow(chartLabels,      new Date(snap.timestamp).toLocaleTimeString());
       pushWindow(heapUsedData,     snap.heapUsed     ?? null);
       pushWindow(heapCommittedData, snap.heapCommitted ?? null);
-      pushWindow(heapMaxData,      snap.heapMax      ?? null);
       pushWindow(threadLiveData,   snap.threadsLive  ?? null);
       pushWindow(threadDaemonData, snap.threadsDaemon ?? null);
       pushWindow(cpuProcessData,   snap.cpuProcess   ?? null);
@@ -538,6 +670,12 @@ const DashboardPage = {
       else clearTimeout(pollTimer);
     };
 
+    function resetZoom(which) {
+      if (which === 'heap'   && heapChart)   heapChart.resetZoom();
+      if (which === 'cpu'    && cpuChart)    cpuChart.resetZoom();
+      if (which === 'thread' && threadChart) threadChart.resetZoom();
+    }
+
     const themeHandler = () => applyChartTheme();
 
     onMounted(async () => {
@@ -577,7 +715,7 @@ const DashboardPage = {
       refreshMs, autoRefresh, lastUpdatedText, loadError,
       appLabel, startedAt, healthComponents, activeAlertsCount, alertsUnavailable, heapUsedPercentText,
       statusBadgeClass, statusToneClass, fmtUptime, fmtBytes, fmtPercent, fmtInteger,
-      refreshNow, toggleAutoRefresh,
+      refreshNow, toggleAutoRefresh, resetZoom,
     };
   },
 };
@@ -831,68 +969,487 @@ const LoggersPage = {
 
 const ThreadDumpPage = {
   template: `
+<div class="td-page">
+
+  <!-- control bar -->
+  <section class="card dashboard-head">
     <div>
-      <div class="page-title">Thread Dump</div>
-      <div v-if="loading" class="loading">Loading…</div>
-      <div v-else-if="unavailable" class="unavailable">Thread dump endpoint is not available.</div>
-      <template v-else>
-        <div class="search-bar">
-          <input class="search-input" v-model="q" placeholder="Filter threads by name or state…" />
-          <span style="font-size:12px;color:var(--text-muted)">{{ filtered.length }} / {{ threads.length }} threads</span>
-          <button class="btn" @click="load">Refresh</button>
-        </div>
-        <div class="card" style="padding:0">
-          <table>
-            <thead><tr><th>Thread</th><th>State</th><th>Blocked / Waited</th></tr></thead>
-            <tbody>
-              <tr v-for="t in filtered" :key="t.threadId">
-                <td>
-                  <div style="font-weight:500">{{ t.threadName }}</div>
-                  <div style="font-size:11px;color:var(--text-muted)">ID: {{ t.threadId }}</div>
-                  <div v-if="expanded.has(t.threadId)">
-                    <div v-for="(frame, i) in t.stackTrace" :key="i" class="stack-frame">{{ frame }}</div>
-                  </div>
-                  <button class="btn" style="margin-top:4px;font-size:10px;padding:2px 8px" @click="toggleExpand(t.threadId)">
-                    {{ expanded.has(t.threadId) ? 'hide stack' : 'show stack' }}
-                  </button>
-                </td>
-                <td><span :class="'thread-state-' + t.threadState?.toLowerCase()">{{ t.threadState }}</span></td>
-                <td style="font-size:12px;color:var(--text-muted)">
-                  <div>blocked: {{ t.blockedCount }}</div>
-                  <div>waited: {{ t.waitedCount }}</div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </template>
+      <div class="page-title" style="margin-bottom:4px">Thread Dump</div>
+      <div class="dashboard-subtitle">{{ currentThreads.length }} threads · {{ snapshots.length }} snapshots</div>
     </div>
+    <div class="dashboard-actions">
+      <span class="live-indicator" :class="{ active: polling }">{{ polling ? 'live' : 'paused' }}</span>
+      <button class="btn" @click="pollNow" :disabled="fetching">Refresh</button>
+      <button class="btn" @click="togglePoll">{{ polling ? 'Pause' : 'Resume' }}</button>
+      <label class="control-inline">Interval
+        <select v-model.number="pollMs">
+          <option :value="2000">2s</option>
+          <option :value="3000">3s</option>
+          <option :value="5000">5s</option>
+          <option :value="10000">10s</option>
+        </select>
+      </label>
+      <span class="refresh-meta">{{ lastUpdatedText }}</span>
+    </div>
+  </section>
+
+  <div v-if="fetching && !currentThreads.length" class="loading">Loading thread dump…</div>
+  <div v-if="loadError" class="error-msg">{{ loadError }}</div>
+
+  <template v-if="currentThreads.length">
+
+    <!-- summary cards -->
+    <section class="overview-grid td-summary-grid">
+      <div v-for="c in summaryCards" :key="c.label" class="quick-card" :class="c.urgent ? 'quick-card-urgent':''">
+        <div class="stat-label">{{ c.label }}</div>
+        <div class="metric-value" :class="c.cls || ''">{{ c.value }}</div>
+        <div class="stat-sub">{{ c.sub }}</div>
+      </div>
+    </section>
+
+    <!-- deadlock alert -->
+    <section v-if="deadlocks.length" class="card td-deadlock-alert">
+      <div class="td-dl-header">⚠ {{ deadlocks.length }} Deadlock Cycle{{ deadlocks.length > 1 ? 's' : '' }} Detected</div>
+      <div v-for="(cycle, ci) in deadlocks" :key="ci" class="td-dl-cycle">
+        <template v-for="(t, ti) in cycle" :key="t.threadId">
+          <span class="td-chip td-chip-blocked" @click="selectThread(t)" style="cursor:pointer">{{ t.threadName }}</span>
+          <span v-if="ti < cycle.length-1" class="td-dl-arrow"> ⟶ blocked by ⟶ </span>
+        </template>
+      </div>
+    </section>
+
+    <!-- charts row -->
+    <section class="td-charts-row">
+      <div class="card td-donut-card">
+        <div class="card-title">State Distribution</div>
+        <div class="td-donut-stage"><canvas ref="stateDonutCanvas"></canvas></div>
+      </div>
+      <div class="card td-trend-card">
+        <div class="card-title-row">
+          <div class="card-title">Thread Count Trend</div>
+          <button class="btn btn-xs" @click="resetTrendZoom">Reset zoom</button>
+        </div>
+        <div class="td-trend-stage"><canvas ref="stateTrendCanvas"></canvas></div>
+      </div>
+    </section>
+
+    <!-- thread table -->
+    <section class="card td-table-section">
+      <div class="td-filters">
+        <input class="search-input td-search" v-model="search" placeholder="Search name or stack…"/>
+        <select class="td-select" v-model="filterState">
+          <option value="">All states</option>
+          <option v-for="s in TD_STATES" :key="s" :value="s">{{ s }}</option>
+        </select>
+        <select class="td-select" v-model="filterPool">
+          <option value="">All pools</option>
+          <option v-for="p in poolNames" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <label class="control-inline"><input type="checkbox" v-model="filterSuspicious"/> Suspicious</label>
+        <label class="control-inline"><input type="checkbox" v-model="filterBlocked"/> Blocked only</label>
+        <span class="td-count">{{ filteredThreads.length }} / {{ currentThreads.length }}</span>
+      </div>
+
+      <div class="td-table-wrap">
+        <table class="td-table">
+          <thead>
+            <tr>
+              <th class="td-th-sort" @click="toggleSort('threadName')">Name <span class="td-sort-icon">{{ sortIcon('threadName') }}</span></th>
+              <th class="td-th-sort" @click="toggleSort('threadId')">ID <span class="td-sort-icon">{{ sortIcon('threadId') }}</span></th>
+              <th class="td-th-sort" @click="toggleSort('state')">State <span class="td-sort-icon">{{ sortIcon('state') }}</span></th>
+              <th title="Daemon">D</th>
+              <th class="td-th-sort" @click="toggleSort('pool')">Pool <span class="td-sort-icon">{{ sortIcon('pool') }}</span></th>
+              <th class="td-th-sort" @click="toggleSort('priority')" title="Priority">Pri <span class="td-sort-icon">{{ sortIcon('priority') }}</span></th>
+              <th>Lock</th>
+              <th class="td-th-sort" @click="toggleSort('suspicionScore')">Risk <span class="td-sort-icon">{{ sortIcon('suspicionScore') }}</span></th>
+              <th class="td-th-sort" @click="toggleSort('stackDepth')" title="Stack depth">Stk <span class="td-sort-icon">{{ sortIcon('stackDepth') }}</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="t in pagedThreads" :key="t.threadId"
+                class="td-row"
+                :class="[t.suspicion.severity !== 'none' ? 'td-row-'+t.suspicion.severity : '',
+                         selectedThread && selectedThread.threadId === t.threadId ? 'td-row-selected' : '']"
+                @click="selectThread(t)">
+              <td class="td-name-cell" :title="t.threadName">{{ t.threadName }}</td>
+              <td class="td-id-cell">{{ t.threadId }}</td>
+              <td><span :class="'thread-state-'+t.state.toLowerCase()">{{ t.state }}</span></td>
+              <td class="td-center">{{ t.daemon ? '●' : '' }}</td>
+              <td><span class="td-pool-chip">{{ t.pool }}</span></td>
+              <td class="td-center">{{ t.priority }}</td>
+              <td class="td-lock-cell" :title="t.lockName||''">{{ t.lockName ? t.lockName.replace(/<.*>/,'').slice(0,28) : '—' }}</td>
+              <td><span :class="'td-risk td-risk-'+t.suspicion.severity">{{ riskLabel(t) }}</span></td>
+              <td class="td-center">{{ t.stack.length }}</td>
+            </tr>
+            <tr v-if="!pagedThreads.length">
+              <td colspan="9" class="td-empty">No threads match the current filters</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="td-pagination">
+        <button class="btn btn-xs" :disabled="page===0" @click="page--">‹ Prev</button>
+        <span class="td-page-info">Page {{ page+1 }} / {{ totalPages||1 }}</span>
+        <button class="btn btn-xs" :disabled="page>=totalPages-1" @click="page++">Next ›</button>
+        <label class="control-inline" style="margin-left:8px">Per page
+          <select v-model.number="pageSize">
+            <option :value="25">25</option><option :value="50">50</option><option :value="100">100</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <!-- pool analysis -->
+    <section class="card">
+      <div class="card-title">Thread Pool Analysis</div>
+      <div class="td-pool-grid">
+        <div v-for="(g, name) in poolGroups" :key="name" class="td-pool-card">
+          <div class="td-pool-name">{{ name }}</div>
+          <div class="td-pool-total">{{ g.total }} thread{{ g.total !== 1 ? 's' : '' }}</div>
+          <div class="td-pool-states">
+            <span v-for="(cnt, st) in g.states" :key="st" :class="'thread-state-'+st.toLowerCase()" style="font-size:11px;margin-right:6px">
+              {{ st.slice(0,1) }}:{{ cnt }}
+            </span>
+          </div>
+          <div v-if="g.suspicious" class="td-pool-risk">⚠ {{ g.suspicious }} suspicious</div>
+          <div v-if="g.topStack" class="td-pool-top-stack" :title="g.topStack">{{ g.topStack }}</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- blocked chains -->
+    <section v-if="blockedChains.length" class="card">
+      <div class="card-title">Blocked Thread Chains ({{ blockedChains.length }})</div>
+      <div v-for="(chain, ci) in blockedChains" :key="ci" class="td-chain">
+        <template v-for="(t, ti) in chain" :key="t.threadId">
+          <span class="td-chip" :class="t.state==='BLOCKED'?'td-chip-blocked':'td-chip-owner'"
+                @click="selectThread(t)" style="cursor:pointer">
+            {{ t.threadName }} <span style="font-size:10px;opacity:0.65">[{{ t.state }}]</span>
+          </span>
+          <span v-if="ti < chain.length-1" class="td-chain-arrow"> ← blocked by ← </span>
+        </template>
+      </div>
+    </section>
+
+  </template>
+
+  <!-- detail drawer -->
+  <transition name="td-slide">
+    <div v-if="selectedThread" class="td-overlay" @click.self="selectedThread=null">
+      <div class="td-drawer">
+        <div class="td-drawer-hd">
+          <div>
+            <div class="td-drawer-title">{{ selectedThread.threadName }}</div>
+            <div style="font-size:11px;color:var(--text-muted)">#{{ selectedThread.threadId }} · {{ selectedThread.pool }}</div>
+          </div>
+          <button class="btn" @click="selectedThread=null">✕</button>
+        </div>
+        <div class="td-drawer-body">
+
+          <div class="td-section-hd">Metadata</div>
+          <table class="td-meta">
+            <tr><td>State</td><td><span :class="'thread-state-'+selectedThread.state.toLowerCase()">{{ selectedThread.state }}</span></td></tr>
+            <tr><td>Daemon</td><td>{{ selectedThread.daemon }}</td></tr>
+            <tr><td>Priority</td><td>{{ selectedThread.priority }}</td></tr>
+            <tr><td>Blocked count</td><td>{{ selectedThread.blockedCount }}</td></tr>
+            <tr><td>Waited count</td><td>{{ selectedThread.waitedCount }}</td></tr>
+            <tr v-if="selectedThread.lockName"><td>Waiting on</td><td class="code" style="font-size:11px;word-break:break-all">{{ selectedThread.lockName }}</td></tr>
+            <tr v-if="selectedThread.lockOwnerName"><td>Lock owner</td><td>{{ selectedThread.lockOwnerName }} (#{{ selectedThread.lockOwnerId }})</td></tr>
+            <tr><td>Risk</td><td><span :class="'td-risk td-risk-'+selectedThread.suspicion.severity">{{ selectedThread.suspicion.severity }} ({{ selectedThread.suspicion.score }})</span></td></tr>
+            <tr v-if="selectedThread.suspicion.reasons.length"><td>Signals</td><td style="font-size:11px">{{ selectedThread.suspicion.reasons.join(' · ') }}</td></tr>
+            <tr><td>Unchanged polls</td><td>{{ unchangedPolls(selectedThread) }}</td></tr>
+          </table>
+
+          <div class="td-section-hd">State History <span style="font-weight:400;opacity:0.6">(newest → oldest)</span></div>
+          <div class="td-hist-row">
+            <span v-for="(h, hi) in stateHistory(selectedThread)" :key="hi"
+                  class="td-hist-dot" :class="'td-hist-'+h.state.toLowerCase()" :title="h.state+' @ '+h.time"></span>
+          </div>
+
+          <div class="td-section-hd">Stack Trace <span style="font-weight:400;opacity:0.6">({{ selectedThread.stack.length }} frames)</span></div>
+          <div class="td-stack">
+            <div v-for="(fr, fi) in selectedThread.stack" :key="fi"
+                 class="td-frame" :class="{'td-frame-app': isAppFrame(fr)}">{{ fr }}</div>
+          </div>
+          <button class="btn" style="margin-top:8px;align-self:flex-start" @click="copyStack">Copy stack trace</button>
+        </div>
+      </div>
+    </div>
+  </transition>
+
+</div>
   `,
+
   setup() {
-    const loading = ref(true), threads = ref([]), q = ref(''), unavailable = ref(false);
-    const expanded = ref(new Set());
-    const filtered = computed(() => {
-      if (!q.value) return threads.value;
-      const lq = q.value.toLowerCase();
-      return threads.value.filter(t =>
-        t.threadName?.toLowerCase().includes(lq) || t.threadState?.toLowerCase().includes(lq));
+    const fetching    = ref(false);
+    const loadError   = ref('');
+    const polling     = ref(true);
+    const pollMs      = ref(3000);
+    const lastUpdated = ref(null);
+    const snapshots   = ref([]);
+    const selectedThread = ref(null);
+    const search      = ref('');
+    const filterState = ref('');
+    const filterPool  = ref('');
+    const filterSuspicious = ref(false);
+    const filterBlocked    = ref(false);
+    const sortField   = ref('suspicionScore');
+    const sortDir     = ref('desc');
+    const page        = ref(0);
+    const pageSize    = ref(50);
+
+    const stateDonutCanvas = ref(null);
+    const stateTrendCanvas = ref(null);
+    let stateDonut = null, stateTrend = null, pollTimer = null;
+
+    // trend rolling arrays (plain, not reactive — Chart.js reads by ref)
+    const trendLabels = [], trendR = [], trendB = [], trendW = [], trendT = [];
+
+    // ── computed ────────────────────────────────────────────────────────────
+    const currentThreads = computed(() => snapshots.value.length ? snapshots.value[0].threads : []);
+    const deadlocks      = computed(() => tdDeadlocks(currentThreads.value));
+    const blockedChains  = computed(() => tdBlockedChains(currentThreads.value));
+    const poolGroups     = computed(() => tdPools(currentThreads.value));
+    const poolNames      = computed(() => Object.keys(poolGroups.value));
+    const lastUpdatedText = computed(() => lastUpdated.value ? `updated ${lastUpdated.value.toLocaleTimeString()}` : '—');
+
+    const filteredThreads = computed(() => {
+      let list = currentThreads.value;
+      if (filterState.value)    list = list.filter(t => t.state === filterState.value);
+      if (filterPool.value)     list = list.filter(t => t.pool  === filterPool.value);
+      if (filterBlocked.value)  list = list.filter(t => t.state === 'BLOCKED');
+      if (filterSuspicious.value) list = list.filter(t => t.suspicion.severity !== 'none');
+      if (search.value) {
+        const q = search.value.toLowerCase();
+        list = list.filter(t => t.threadName.toLowerCase().includes(q) ||
+                                t.stack.some(f => f.toLowerCase().includes(q)));
+      }
+      const f = sortField.value, d = sortDir.value === 'asc' ? 1 : -1;
+      return [...list].sort((a, b) => {
+        const av = f === 'suspicionScore' ? a.suspicion.score : f === 'stackDepth' ? a.stack.length : a[f] ?? '';
+        const bv = f === 'suspicionScore' ? b.suspicion.score : f === 'stackDepth' ? b.stack.length : b[f] ?? '';
+        return typeof av === 'string' ? d * av.localeCompare(bv) : d * (av - bv);
+      });
     });
-    const toggleExpand = (id) => {
-      const s = new Set(expanded.value);
-      s.has(id) ? s.delete(id) : s.add(id);
-      expanded.value = s;
-    };
-    const load = async () => {
-      loading.value = true;
+
+    const totalPages   = computed(() => Math.ceil(filteredThreads.value.length / pageSize.value));
+    const pagedThreads = computed(() => filteredThreads.value.slice(page.value * pageSize.value, (page.value + 1) * pageSize.value));
+
+    const summaryCards = computed(() => {
+      const ts = currentThreads.value;
+      const prev = snapshots.value[1] || null;
+      const counts = {};
+      let daemon = 0, suspicious = 0;
+      for (const t of ts) {
+        counts[t.state] = (counts[t.state] || 0) + 1;
+        if (t.daemon) daemon++;
+        if (t.suspicion.severity !== 'none') suspicious++;
+      }
+      const changed = prev ? ts.filter(t => { const p = prev.threadMap.get(t.threadId); return !p || p.state !== t.state; }).length : 0;
+      const newCnt  = prev ? ts.filter(t => !prev.threadMap.has(t.threadId)).length : 0;
+      return [
+        { label:'Total', value:ts.length, sub: newCnt ? `+${newCnt} new` : 'no new threads' },
+        { label:'Runnable', value:counts.RUNNABLE||0, sub:'actively executing' },
+        { label:'Blocked', value:counts.BLOCKED||0, sub:'waiting for monitor',
+          cls:counts.BLOCKED?'text-danger':'', urgent:!!(counts.BLOCKED) },
+        { label:'Waiting', value:(counts.WAITING||0)+(counts.TIMED_WAITING||0), sub:'WAITING + TIMED_WAITING' },
+        { label:'Daemon', value:daemon, sub:'background threads' },
+        { label:'Deadlocked', value:deadlocks.value.length, sub:deadlocks.value.length?'cycles detected!':'none detected',
+          cls:deadlocks.value.length?'text-danger':'', urgent:!!deadlocks.value.length },
+        { label:'Changed', value:changed, sub:'state changes this poll' },
+        { label:'Suspicious', value:suspicious, sub:'risk score > 0',
+          cls:suspicious?'text-warn':'', urgent:!!suspicious },
+      ];
+    });
+
+    // ── charts ──────────────────────────────────────────────────────────────
+    function initCharts() {
+      if (!stateDonutCanvas.value || !stateTrendCanvas.value) return;
+      const p = chartTheme();
+      stateDonut = new Chart(stateDonutCanvas.value, {
+        type: 'doughnut',
+        data: {
+          labels: TD_STATES,
+          datasets: [{ data: TD_STATES.map(()=>0), backgroundColor: TD_STATES.map(s => TD_STATE_COLORS[s]||'#888'), borderWidth: 0 }],
+        },
+        options: {
+          animation: false, cutout: '62%', responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { position:'right', labels:{ boxWidth:10, font:{size:10}, color:p.axis } },
+            tooltip: { callbacks:{ label: ctx => `${ctx.label}: ${ctx.parsed}` } },
+          },
+        },
+      });
+      stateTrend = new Chart(stateTrendCanvas.value, {
+        type: 'line',
+        data: {
+          labels: trendLabels,
+          datasets: [
+            { label:'Runnable',      data:trendR, borderColor:'#31d28f', backgroundColor:'transparent', borderWidth:2, pointRadius:0, tension:0.3 },
+            { label:'Blocked',       data:trendB, borderColor:'#ff6c79', backgroundColor:'transparent', borderWidth:2, pointRadius:0, tension:0.3 },
+            { label:'Waiting',       data:trendW, borderColor:'#f7bf57', backgroundColor:'transparent', borderWidth:2, pointRadius:0, tension:0.3 },
+            { label:'Timed Waiting', data:trendT, borderColor:'#a2b5d6', backgroundColor:'transparent', borderWidth:2, pointRadius:0, tension:0.3 },
+          ],
+        },
+        options: {
+          animation:false, responsive:true, maintainAspectRatio:false,
+          interaction:{ mode:'index', intersect:false },
+          plugins: {
+            legend:{ position:'bottom', labels:{ boxWidth:10, font:{size:10}, color:p.axis } },
+            tooltip:{ backgroundColor:p.tooltip },
+            zoom:{ zoom:{wheel:{enabled:true},pinch:{enabled:true},mode:'x'}, pan:{enabled:true,mode:'x'} },
+          },
+          scales:{
+            x:{ ticks:{maxTicksLimit:8,font:{size:10},color:p.axis}, grid:{color:p.grid} },
+            y:{ beginAtZero:true, ticks:{font:{size:10},color:p.axis}, grid:{color:p.grid} },
+          },
+        },
+      });
+    }
+
+    function updateCharts(threads) {
+      if (!stateDonut || !stateTrend) return;
+      const c = {};
+      for (const s of TD_STATES) c[s] = 0;
+      for (const t of threads) c[t.state] = (c[t.state]||0)+1;
+      stateDonut.data.datasets[0].data = TD_STATES.map(s => c[s]);
+      stateDonut.update('none');
+      const time = new Date().toLocaleTimeString();
+      [trendLabels,trendR,trendB,trendW,trendT].forEach(a => { if(a.length >= TD_TREND_WIN) a.shift(); });
+      trendLabels.push(time); trendR.push(c.RUNNABLE||0); trendB.push(c.BLOCKED||0);
+      trendW.push(c.WAITING||0); trendT.push(c.TIMED_WAITING||0);
+      stateTrend.update('none');
+    }
+
+    function applyChartTheme() {
+      const p = chartTheme();
+      if (stateDonut) { stateDonut.options.plugins.legend.labels.color = p.axis; stateDonut.update('none'); }
+      if (stateTrend) {
+        stateTrend.options.plugins.legend.labels.color = p.axis;
+        stateTrend.options.plugins.tooltip.backgroundColor = p.tooltip;
+        ['x','y'].forEach(ax => { stateTrend.options.scales[ax].ticks.color = p.axis; stateTrend.options.scales[ax].grid.color = p.grid; });
+        stateTrend.update('none');
+      }
+    }
+
+    function resetTrendZoom() { if (stateTrend) stateTrend.resetZoom(); }
+
+    // ── polling ─────────────────────────────────────────────────────────────
+    async function doFetch() {
+      if (fetching.value) return;
+      fetching.value = true;
       try {
         const r = await apiFetch('threaddump');
-        if (r.status === 'unavailable') { unavailable.value = true; }
-        else { threads.value = r.data?.threads || []; }
-      } catch (e) { unavailable.value = true; }
-      loading.value = false;
+        if (r.status !== 'ok' || !r.data) throw new Error('thread dump unavailable');
+        const ts = Date.now();
+        const prev = snapshots.value.slice(0, 10);
+        const threads = (r.data.threads || []).map(raw => {
+          const t = tdNormalize(raw, ts);
+          t.suspicion = tdScore(t, prev);
+          return t;
+        });
+        const threadMap = new Map(threads.map(t => [t.threadId, t]));
+        const snap = { ts, time: new Date(ts).toLocaleTimeString(), threads, threadMap };
+        snapshots.value = [snap, ...snapshots.value].slice(0, TD_SNAP_MAX);
+        lastUpdated.value = new Date(ts);
+        loadError.value = '';
+        updateCharts(threads);
+      } catch(e) {
+        loadError.value = `Poll failed: ${e.message}`;
+      } finally {
+        fetching.value = false;
+      }
+    }
+
+    function schedule() {
+      clearTimeout(pollTimer);
+      if (!polling.value) return;
+      pollTimer = setTimeout(async () => { await doFetch(); schedule(); }, pollMs.value);
+    }
+
+    async function pollNow() { clearTimeout(pollTimer); await doFetch(); schedule(); }
+    function togglePoll() { polling.value = !polling.value; polling.value ? schedule() : clearTimeout(pollTimer); }
+
+    // ── interactions ────────────────────────────────────────────────────────
+    function selectThread(t) {
+      selectedThread.value = selectedThread.value?.threadId === t.threadId ? null : t;
+    }
+
+    function toggleSort(field) {
+      if (sortField.value === field) sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc';
+      else { sortField.value = field; sortDir.value = field === 'suspicionScore' ? 'desc' : 'asc'; }
+      page.value = 0;
+    }
+
+    function sortIcon(f) {
+      if (sortField.value !== f) return '⇅';
+      return sortDir.value === 'asc' ? '↑' : '↓';
+    }
+
+    function riskLabel(t) {
+      return t.suspicion.severity === 'none' ? '—' : `${t.suspicion.severity} (${t.suspicion.score})`;
+    }
+
+    function unchangedPolls(t) {
+      let n = 0;
+      for (const s of snapshots.value.slice(1)) {
+        const p = s.threadMap && s.threadMap.get(t.threadId);
+        if (p && p.sig === t.sig && p.state === t.state) n++;
+        else break;
+      }
+      return n;
+    }
+
+    function stateHistory(t) {
+      return [...snapshots.value].slice(0, 20).reverse().map(s => {
+        const f = s.threadMap && s.threadMap.get(t.threadId);
+        return { state: f ? f.state : 'GONE', time: s.time };
+      });
+    }
+
+    async function copyStack() {
+      if (!selectedThread.value) return;
+      const t = selectedThread.value;
+      const txt = `"${t.threadName}" id=${t.threadId} ${t.state}\n` + t.stack.join('\n');
+      try { await navigator.clipboard.writeText(txt); } catch(_) {}
+    }
+
+    const isAppFrame = tdIsApp;
+
+    watch([search, filterState, filterPool, filterSuspicious, filterBlocked], () => { page.value = 0; });
+    watch(pollMs, () => { if (polling.value) schedule(); });
+
+    const themeHandler = applyChartTheme;
+
+    onMounted(async () => {
+      window.addEventListener('monitro-theme-change', themeHandler);
+      await doFetch();
+      await Vue.nextTick();
+      initCharts();
+      schedule();
+    });
+
+    onUnmounted(() => {
+      window.removeEventListener('monitro-theme-change', themeHandler);
+      clearTimeout(pollTimer);
+      if (stateDonut) { stateDonut.destroy(); stateDonut = null; }
+      if (stateTrend) { stateTrend.destroy(); stateTrend = null; }
+    });
+
+    return {
+      fetching, loadError, polling, pollMs, lastUpdatedText,
+      snapshots, currentThreads, selectedThread,
+      search, filterState, filterPool, filterSuspicious, filterBlocked,
+      sortField, sortDir, page, pageSize, totalPages,
+      filteredThreads, pagedThreads, summaryCards,
+      deadlocks, blockedChains, poolGroups, poolNames,
+      stateDonutCanvas, stateTrendCanvas,
+      TD_STATES,
+      pollNow, togglePoll, selectThread, toggleSort, sortIcon,
+      riskLabel, unchangedPolls, stateHistory, copyStack,
+      resetTrendZoom, isAppFrame,
     };
-    onMounted(load);
-    return { loading, threads, filtered, q, unavailable, expanded, toggleExpand, load };
   },
 };
 

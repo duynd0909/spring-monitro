@@ -62,7 +62,10 @@
       "Bash(JAVA_HOME=\"C:/Users/Admin/.jdks/corretto-17.0.11\" mvn package -pl monitor-core,monitor-alerting,monitor-server,monitor-starter,monitor-sample -am -q)",
       "Bash(C:/Users/Admin/.jdks/corretto-17.0.11/bin/java -jar target/monitor-sample-0.1.0-SNAPSHOT.jar --embedded.monitor.security.mode=NONE '--embedded.monitor.alerting.rules[0].id=test-heap' '--embedded.monitor.alerting.rules[0].name=Test Heap Alert' '--embedded.monitor.alerting.rules[0].metric=jvm.memory.used' '--embedded.monitor.alerting.rules[0].tags.area=heap' '--embedded.monitor.alerting.rules[0].threshold=0' '--embedded.monitor.alerting.rules[0].operator=GT' '--embedded.monitor.alerting.rules[0].severity=WARN' --embedded.monitor.alerting.evaluation-interval=5s)",
       "Bash(curl -s http://localhost:8090/monitro/api/alerts/rules)",
-      "Bash(curl -s http://localhost:8090/monitro/api/alerts)"
+      "Bash(curl -s http://localhost:8090/monitro/api/alerts)",
+      "Bash(cp \"D:/Projects/spring-monitro/monitor-ui/src/main/resources/META-INF/resources/monitro/assets/app.js\" \"D:/Projects/spring-monitro/monitor-ui/target/classes/META-INF/resources/monitro/assets/app.js\")",
+      "Bash(cp \"D:/Projects/spring-monitro/monitor-ui/src/main/resources/META-INF/resources/monitro/assets/app.css\" \"D:/Projects/spring-monitro/monitor-ui/target/classes/META-INF/resources/monitro/assets/app.css\")",
+      "Bash(cp \"D:/Projects/spring-monitro/monitor-ui/src/main/resources/META-INF/resources/monitro/index.html\" \"D:/Projects/spring-monitro/monitor-ui/target/classes/META-INF/resources/monitro/index.html\")"
     ]
   }
 }

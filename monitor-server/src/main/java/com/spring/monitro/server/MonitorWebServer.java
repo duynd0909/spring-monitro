@@ -63,7 +63,8 @@ public class MonitorWebServer implements SmartLifecycle {
         childContext.refresh();
 
         running = true;
-        log.info("Spring-Monitro admin server ready — http://{}:{}{}/api/ping", address, port, contextPath);
+        String displayAddress = "0.0.0.0".equals(address) ? "localhost" : address;
+        log.info("Spring-Monitro admin server ready — http://{}:{}{}", displayAddress, port, contextPath);
     }
 
     @Override
