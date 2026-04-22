@@ -65,7 +65,10 @@
       "Bash(curl -s http://localhost:8090/monitro/api/alerts)",
       "Bash(cp \"D:/Projects/spring-monitro/monitor-ui/src/main/resources/META-INF/resources/monitro/assets/app.js\" \"D:/Projects/spring-monitro/monitor-ui/target/classes/META-INF/resources/monitro/assets/app.js\")",
       "Bash(cp \"D:/Projects/spring-monitro/monitor-ui/src/main/resources/META-INF/resources/monitro/assets/app.css\" \"D:/Projects/spring-monitro/monitor-ui/target/classes/META-INF/resources/monitro/assets/app.css\")",
-      "Bash(cp \"D:/Projects/spring-monitro/monitor-ui/src/main/resources/META-INF/resources/monitro/index.html\" \"D:/Projects/spring-monitro/monitor-ui/target/classes/META-INF/resources/monitro/index.html\")"
+      "Bash(cp \"D:/Projects/spring-monitro/monitor-ui/src/main/resources/META-INF/resources/monitro/index.html\" \"D:/Projects/spring-monitro/monitor-ui/target/classes/META-INF/resources/monitro/index.html\")",
+      "Bash(JAVA_HOME=\"C:/Users/Admin/.jdks/corretto-17.0.11\" mvn package -pl monitor-ui,monitor-sample -am -q)",
+      "Bash(JAVA_HOME=\"C:/Users/Admin/.jdks/corretto-17.0.11\" mvn package -pl monitor-ui,monitor-sample -am)",
+      "Bash(JAVA_HOME=\"C:/Users/Admin/.jdks/corretto-17.0.11\" mvn clean package -pl monitor-actuator -am -q)"
     ]
   }
 }

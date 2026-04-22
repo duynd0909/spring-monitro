@@ -3,7 +3,6 @@ package com.spring.monitro.actuator.config;
 import com.spring.monitro.actuator.collector.*;
 import com.spring.monitro.core.collector.CollectorRegistry;
 import org.springframework.beans.factory.SmartInitializingSingleton;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
@@ -57,9 +56,10 @@ public class ActuatorCollectorConfig {
             tryRegister("threaddump",
                     org.springframework.boot.actuate.management.ThreadDumpEndpoint.class,
                     ThreadDumpCollector::new);
+            String appName = ctx.getEnvironment().getProperty("spring.application.name");
             tryRegister("info",
                     org.springframework.boot.actuate.info.InfoEndpoint.class,
-                    InfoCollector::new);
+                    ep -> new InfoCollector(ep, appName));
             tryRegister("snapshot",
                     org.springframework.boot.actuate.metrics.MetricsEndpoint.class,
                     SnapshotCollector::new);

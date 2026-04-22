@@ -1018,21 +1018,6 @@ const ThreadDumpPage = {
       </div>
     </section>
 
-    <!-- charts row -->
-    <section class="td-charts-row">
-      <div class="card td-donut-card">
-        <div class="card-title">State Distribution</div>
-        <div class="td-donut-stage"><canvas ref="stateDonutCanvas"></canvas></div>
-      </div>
-      <div class="card td-trend-card">
-        <div class="card-title-row">
-          <div class="card-title">Thread Count Trend</div>
-          <button class="btn btn-xs" @click="resetTrendZoom">Reset zoom</button>
-        </div>
-        <div class="td-trend-stage"><canvas ref="stateTrendCanvas"></canvas></div>
-      </div>
-    </section>
-
     <!-- thread table -->
     <section class="card td-table-section">
       <div class="td-filters">
@@ -1057,6 +1042,7 @@ const ThreadDumpPage = {
               <th class="td-th-sort" @click="toggleSort('threadName')">Name <span class="td-sort-icon">{{ sortIcon('threadName') }}</span></th>
               <th class="td-th-sort" @click="toggleSort('threadId')">ID <span class="td-sort-icon">{{ sortIcon('threadId') }}</span></th>
               <th class="td-th-sort" @click="toggleSort('state')">State <span class="td-sort-icon">{{ sortIcon('state') }}</span></th>
+              <th title="State timeline — oldest left, newest right">Timeline</th>
               <th title="Daemon">D</th>
               <th class="td-th-sort" @click="toggleSort('pool')">Pool <span class="td-sort-icon">{{ sortIcon('pool') }}</span></th>
               <th class="td-th-sort" @click="toggleSort('priority')" title="Priority">Pri <span class="td-sort-icon">{{ sortIcon('priority') }}</span></th>
@@ -1074,6 +1060,16 @@ const ThreadDumpPage = {
               <td class="td-name-cell" :title="t.threadName">{{ t.threadName }}</td>
               <td class="td-id-cell">{{ t.threadId }}</td>
               <td><span :class="'thread-state-'+t.state.toLowerCase()">{{ t.state }}</span></td>
+              <td class="td-tl-cell">
+                <div class="td-timeline" :title="'State history — ' + t.state">
+                  <span v-for="(h, hi) in stateHistory(t)" :key="hi"
+                        class="td-tl-seg"
+                        :class="{'td-tl-seg-current': hi === stateHistory(t).length - 1}"
+                        :style="{ background: tdStateColor(h.state) }"
+                        :title="h.state + ' @ ' + h.time">
+                  </span>
+                </div>
+              </td>
               <td class="td-center">{{ t.daemon ? '●' : '' }}</td>
               <td><span class="td-pool-chip">{{ t.pool }}</span></td>
               <td class="td-center">{{ t.priority }}</td>
@@ -1082,7 +1078,7 @@ const ThreadDumpPage = {
               <td class="td-center">{{ t.stack.length }}</td>
             </tr>
             <tr v-if="!pagedThreads.length">
-              <td colspan="9" class="td-empty">No threads match the current filters</td>
+              <td colspan="10" class="td-empty">No threads match the current filters</td>
             </tr>
           </tbody>
         </table>
@@ -1099,6 +1095,12 @@ const ThreadDumpPage = {
         </label>
       </div>
     </section>
+
+    <!-- state donut -->
+<!--    <section class="card td-donut-card" style="max-width:320px">-->
+<!--      <div class="card-title">State Distribution</div>-->
+<!--      <div class="td-donut-stage"><canvas ref="stateDonutCanvas"></canvas></div>-->
+<!--    </section>-->
 
     <!-- pool analysis -->
     <section class="card">
@@ -1200,11 +1202,7 @@ const ThreadDumpPage = {
     const pageSize    = ref(50);
 
     const stateDonutCanvas = ref(null);
-    const stateTrendCanvas = ref(null);
-    let stateDonut = null, stateTrend = null, pollTimer = null;
-
-    // trend rolling arrays (plain, not reactive — Chart.js reads by ref)
-    const trendLabels = [], trendR = [], trendB = [], trendW = [], trendT = [];
+    let stateDonut = null, pollTimer = null;
 
     // ── computed ────────────────────────────────────────────────────────────
     const currentThreads = computed(() => snapshots.value.length ? snapshots.value[0].threads : []);
@@ -1265,7 +1263,7 @@ const ThreadDumpPage = {
 
     // ── charts ──────────────────────────────────────────────────────────────
     function initCharts() {
-      if (!stateDonutCanvas.value || !stateTrendCanvas.value) return;
+      if (!stateDonutCanvas.value) return;
       const p = chartTheme();
       stateDonut = new Chart(stateDonutCanvas.value, {
         type: 'doughnut',
@@ -1281,59 +1279,21 @@ const ThreadDumpPage = {
           },
         },
       });
-      stateTrend = new Chart(stateTrendCanvas.value, {
-        type: 'line',
-        data: {
-          labels: trendLabels,
-          datasets: [
-            { label:'Runnable',      data:trendR, borderColor:'#31d28f', backgroundColor:'transparent', borderWidth:2, pointRadius:0, tension:0.3 },
-            { label:'Blocked',       data:trendB, borderColor:'#ff6c79', backgroundColor:'transparent', borderWidth:2, pointRadius:0, tension:0.3 },
-            { label:'Waiting',       data:trendW, borderColor:'#f7bf57', backgroundColor:'transparent', borderWidth:2, pointRadius:0, tension:0.3 },
-            { label:'Timed Waiting', data:trendT, borderColor:'#a2b5d6', backgroundColor:'transparent', borderWidth:2, pointRadius:0, tension:0.3 },
-          ],
-        },
-        options: {
-          animation:false, responsive:true, maintainAspectRatio:false,
-          interaction:{ mode:'index', intersect:false },
-          plugins: {
-            legend:{ position:'bottom', labels:{ boxWidth:10, font:{size:10}, color:p.axis } },
-            tooltip:{ backgroundColor:p.tooltip },
-            zoom:{ zoom:{wheel:{enabled:true},pinch:{enabled:true},mode:'x'}, pan:{enabled:true,mode:'x'} },
-          },
-          scales:{
-            x:{ ticks:{maxTicksLimit:8,font:{size:10},color:p.axis}, grid:{color:p.grid} },
-            y:{ beginAtZero:true, ticks:{font:{size:10},color:p.axis}, grid:{color:p.grid} },
-          },
-        },
-      });
     }
 
     function updateCharts(threads) {
-      if (!stateDonut || !stateTrend) return;
+      if (!stateDonut) return;
       const c = {};
       for (const s of TD_STATES) c[s] = 0;
       for (const t of threads) c[t.state] = (c[t.state]||0)+1;
       stateDonut.data.datasets[0].data = TD_STATES.map(s => c[s]);
       stateDonut.update('none');
-      const time = new Date().toLocaleTimeString();
-      [trendLabels,trendR,trendB,trendW,trendT].forEach(a => { if(a.length >= TD_TREND_WIN) a.shift(); });
-      trendLabels.push(time); trendR.push(c.RUNNABLE||0); trendB.push(c.BLOCKED||0);
-      trendW.push(c.WAITING||0); trendT.push(c.TIMED_WAITING||0);
-      stateTrend.update('none');
     }
 
     function applyChartTheme() {
       const p = chartTheme();
       if (stateDonut) { stateDonut.options.plugins.legend.labels.color = p.axis; stateDonut.update('none'); }
-      if (stateTrend) {
-        stateTrend.options.plugins.legend.labels.color = p.axis;
-        stateTrend.options.plugins.tooltip.backgroundColor = p.tooltip;
-        ['x','y'].forEach(ax => { stateTrend.options.scales[ax].ticks.color = p.axis; stateTrend.options.scales[ax].grid.color = p.grid; });
-        stateTrend.update('none');
-      }
     }
-
-    function resetTrendZoom() { if (stateTrend) stateTrend.resetZoom(); }
 
     // ── polling ─────────────────────────────────────────────────────────────
     async function doFetch() {
@@ -1417,6 +1377,10 @@ const ThreadDumpPage = {
 
     const isAppFrame = tdIsApp;
 
+    function tdStateColor(state) {
+      return TD_STATE_COLORS[state] || 'rgba(149,168,207,0.35)';
+    }
+
     watch([search, filterState, filterPool, filterSuspicious, filterBlocked], () => { page.value = 0; });
     watch(pollMs, () => { if (polling.value) schedule(); });
 
@@ -1434,7 +1398,6 @@ const ThreadDumpPage = {
       window.removeEventListener('monitro-theme-change', themeHandler);
       clearTimeout(pollTimer);
       if (stateDonut) { stateDonut.destroy(); stateDonut = null; }
-      if (stateTrend) { stateTrend.destroy(); stateTrend = null; }
     });
 
     return {
@@ -1444,11 +1407,11 @@ const ThreadDumpPage = {
       sortField, sortDir, page, pageSize, totalPages,
       filteredThreads, pagedThreads, summaryCards,
       deadlocks, blockedChains, poolGroups, poolNames,
-      stateDonutCanvas, stateTrendCanvas,
+      stateDonutCanvas,
       TD_STATES,
       pollNow, togglePoll, selectThread, toggleSort, sortIcon,
       riskLabel, unchangedPolls, stateHistory, copyStack,
-      resetTrendZoom, isAppFrame,
+      isAppFrame, tdStateColor,
     };
   },
 };

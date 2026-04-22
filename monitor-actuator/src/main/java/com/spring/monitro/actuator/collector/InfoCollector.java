@@ -13,10 +13,12 @@ public class InfoCollector implements MonitorDataCollector<InfoData> {
     public static final String ID = "info";
 
     private final InfoEndpoint infoEndpoint;
+    private final String applicationName;
     private final Instant startTime;
 
-    public InfoCollector(InfoEndpoint infoEndpoint) {
+    public InfoCollector(InfoEndpoint infoEndpoint, String applicationName) {
         this.infoEndpoint = infoEndpoint;
+        this.applicationName = applicationName;
         this.startTime = InfoData.processStartTime();
     }
 
@@ -32,7 +34,9 @@ public class InfoCollector implements MonitorDataCollector<InfoData> {
         @SuppressWarnings("unchecked")
         Map<String, Object> git = (Map<String, Object>) info.getOrDefault("git", Map.of());
 
-        String appName = build.getOrDefault("name", "unknown").toString();
+        // Prefer build-info name, then spring.application.name, then generic fallback
+        String appName = (String) build.getOrDefault("name",
+                applicationName != null ? applicationName : "Spring Application");
 
         return CollectionResult.success(new InfoData(
                 appName,

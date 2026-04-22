@@ -664,13 +664,10 @@ select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3p
 .text-danger { color: var(--danger); }
 .text-warn   { color: var(--warning); }
 
-/* charts row */
-.td-charts-row { display: grid; grid-template-columns: 280px 1fr; gap: 16px; }
-.td-donut-card, .td-trend-card { min-width: 0; display: flex; flex-direction: column; }
+/* state donut */
+.td-donut-card { min-width: 0; display: flex; flex-direction: column; }
 .td-donut-stage { position: relative; height: 200px; }
 .td-donut-stage canvas { width: 100% !important; height: 100% !important; display: block; }
-.td-trend-stage { position: relative; height: 200px; flex: 1; }
-.td-trend-stage canvas { width: 100% !important; height: 100% !important; display: block; }
 
 /* filters bar */
 .td-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
@@ -684,8 +681,9 @@ select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3p
 .td-table-wrap { overflow-x: auto; max-height: 560px; overflow-y: auto; border-radius: 6px; }
 .td-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .td-table thead th {
-  position: sticky; top: 0; z-index: 1;
-  background: var(--card-bg);
+  position: sticky; top: 0; z-index: 2;
+  background: var(--surface-2);
+  box-shadow: 0 1px 0 var(--border);
   padding: 8px 10px;
   text-align: left;
   font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.9px;
@@ -777,6 +775,32 @@ select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3p
 .td-frame     { color: var(--text-soft); padding: 1px 0; white-space: nowrap; }
 .td-frame-app { color: var(--primary); font-weight: 500; }
 
+/* inline timeline bar */
+.td-tl-cell { padding: 6px 10px; }
+.td-timeline {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 88px;
+}
+.td-tl-seg {
+  display: inline-block;
+  width: 6px;
+  height: 16px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  opacity: 0.72;
+  transition: opacity 0.12s, transform 0.12s;
+}
+.td-tl-seg:hover { opacity: 1; transform: scaleY(1.25); }
+/* most recent segment is slightly taller and fully opaque */
+.td-tl-seg-current {
+  height: 20px;
+  opacity: 1;
+  border-radius: 3px;
+  box-shadow: 0 0 5px currentColor;
+}
+
 /* state history dots */
 .td-hist-row { display: flex; gap: 3px; flex-wrap: wrap; padding: 4px 0; }
 .td-hist-dot { width: 14px; height: 14px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
@@ -793,7 +817,6 @@ select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3p
 .td-slide-enter-from, .td-slide-leave-to { transform: translateX(100%); }
 
 @media (max-width: 1024px) {
-  .td-charts-row { grid-template-columns: 1fr; }
   .td-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .td-drawer { width: 100vw; }
 }
