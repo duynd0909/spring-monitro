@@ -34,8 +34,8 @@ Your JVM Process
 ```xml
 <dependency>
     <groupId>io.github.duynd0909</groupId>
-    <artifactId>monitor-starter</artifactId>
-    <version>0.1.0</version>
+    <artifactId>spring-monitro-starter</artifactId>
+    <version>0.1.1</version>
 </dependency>
 ```
 
@@ -220,7 +220,7 @@ spring-monitro/
 ├── monitor-ui/         Static Vue 3 SPA (no build step)
 ├── monitor-security/   Servlet filter-based Basic Auth
 ├── monitor-alerting/   Alert rule engine, state manager, notifiers
-├── monitor-starter/    Auto-configuration entry point (the only dep users need)
+├── spring-monitro-starter/  Auto-configuration entry point (the only dep users need)
 └── monitor-sample/     Demo Spring Boot app
 ```
 
